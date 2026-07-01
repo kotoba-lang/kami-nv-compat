@@ -39,11 +39,11 @@
         mgr (at/action-manager [(:term m1) (:term m2)])]
     (is (= 3 (:total-action-dim mgr)))
     (at/manager-process-actions! mgr [10 20 30])
-    (is (= [10 20] @(:processed-actions (:state m1))))
-    (is (= [30] @(:processed-actions (:state m2))))
+    (is (= [10.0 20.0] @(:processed-actions (:state m1))))
+    (is (= [30.0] @(:processed-actions (:state m2))))
     (at/manager-apply-actions! mgr {})
-    (is (= [10 20] @(:applied m1)))
-    (is (= [30] @(:applied m2)))
+    (is (= [10.0 20.0] @(:applied m1)))
+    (is (= [30.0] @(:applied m2)))
     (at/manager-reset! mgr)
     (is (= [0 0] @(:raw-actions (:state m1))))))
 

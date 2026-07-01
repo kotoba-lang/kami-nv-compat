@@ -5,7 +5,7 @@
   scale + offset), then writes the result onto the env (apply-actions!).
   ActionManager composes multiple terms into a single combined action vector.
   Wave 16c of ADR-2607020130."
-  (:require [kotoba.lang.kami-nv-compat.actions.articulated-env :as ae]))
+  (:require [clojure.string :as str]))
 
 (defprotocol IActionTerm
   (action-dim       [this])
