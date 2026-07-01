@@ -63,16 +63,17 @@
 (def exp Math/exp) (def log Math/log)
 (def floor Math/floor) (def ceil Math/ceil)
 
-(defn abs [x] (Math/abs x))
+(defn wp-abs [x] (Math/abs (double x)))
 (defn clamp [x low high] (max low (min high x)))
 
 ;; ── Vec3 / Vec4 (plain vectors [x y z] / [x y z w]) ──────────────────────
 
 (defn vec3-add [a b] [(+ (a 0) (b 0)) (+ (a 1) (b 1)) (+ (a 2) (b 2))])
 (defn vec3-sub [a b] [(- (a 0) (b 0)) (- (a 1) (b 1)) (- (a 2) (b 2))])
-(defn vec3-mul
-  ([a s] [(* (a 0) s) (* (a 1) s) (* (a 2) s)])
-  ([a b] [(* (a 0) (b 0)) (* (a 1) (b 1)) (* (a 2) (b 2))]))
+(defn vec3-mul [a b]
+  (if (number? b)
+    [(* (a 0) b) (* (a 1) b) (* (a 2) b)]
+    [(* (a 0) (b 0)) (* (a 1) (b 1)) (* (a 2) (b 2))]))
 (defn vec3-dot [a b] (+ (* (a 0) (b 0)) (* (a 1) (b 1)) (* (a 2) (b 2))))
 (defn vec3-cross [a b]
   [(- (* (a 1) (b 2)) (* (a 2) (b 1)))
@@ -92,7 +93,7 @@
   (let [n (length axis)]
     (if (< n 1e-12) [0.0 0.0 0.0 1.0]
         (let [u (vec (map #(/ % n) axis)) h (* angle 0.5) s (Math/sin h)]
-          [((* (u 0) s)) ((* (u 1) s)) ((* (u 2) s)) (Math/cos h)]))))
+          [(* (u 0) s) (* (u 1) s) (* (u 2) s) (Math/cos h)])))
 (defn quat-inverse [q] [(- (q 0)) (- (q 1)) (- (q 2)) (q 3)])
 (defn quat-mul [a b]
   [(+ (* (a 3) (b 0)) (* (a 0) (b 3)) (* (a 1) (b 2)) (- (* (a 2) (b 1))))
@@ -123,14 +124,13 @@
 
 (defn wp-array
   "Build a mutable WpArray from a vector."
-  ([data] (atom (vec data)))
-  ([dtype n] (atom (vec (repeat n 0)))))
+  ([data] (atom (vec data))))
 
 (defn wp-zeros [dtype n] (atom (vec (repeat n 0))))
 (defn wp-empty [dtype n] (atom (vec (repeat n 0))))
 (defn wp-from-typed-array [data] (atom (vec data)))
 (defn wp-get [arr i] (nth @arr i))
-(defn wp-set [arr i v] (swap! assoc assoc i v) v)
+(defn wp-set [arr i v] (swap! arr assoc i v) v)
 (defn wp-length [arr] (count @arr))
 (defn wp-index-of [arr i] (wp-get arr i))
 
