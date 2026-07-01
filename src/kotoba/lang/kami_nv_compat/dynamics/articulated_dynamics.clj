@@ -160,3 +160,84 @@
   "Zero generalized coords/velocities/accelerations for an n-DoF articulation."
   [n]
   {:q (vec (repeat n 0)) :qdot (vec (repeat n 0)) :qddot (vec (repeat n 0))})
+
+;; ── Forward kinematics ────────────────────────────────────────────────────
+
+(defn- mat3-vec [m v]
+  (vec (for [i (range 3)]
+         (+ (* (get-in m [i 0]) (v 0))
+            (* (get-in m [i 1]) (v 1))
+            (* (get-in m [i 2]) (v 2))))))
+
+(defn forward-kinematics
+  "World-frame pose {:R 3×3 :p 3} per joint, composing up the parent chain."
+  [built q]
+  (when (not= (count q) (:n built))
+    (throw (ex-info (str "forward-kinematics: q length must be " (:n built)) {:got (count q)})))
+  (loop [i 0 out []]
+    (if (>= i (:n built))
+      out
+      (let [Rorigin (get-in built [:rpy-rotation-matrix i])
+            porigin (get-in built [:xyz-translation i])
+            axis    (get-in built [:joint-axis i])
+            kind    (get-in built [:joint-kinds i])
+            [Ri-in-parent pi-in-parent]
+            (condp = kind
+              "revolute"   [(mat3-mul Rorigin (rodrigues-rotation axis (q i))) porigin]
+              "continuous" [(mat3-mul Rorigin (rodrigues-rotation axis (q i))) porigin]
+              "prismatic"  [Rorigin (vec (map + porigin (mat3-vec Rorigin (mapv #(* (q i) %) axis))))]
+              [Rorigin porigin])                                  ; fixed
+            pidx (get-in built [:parent-joint i])
+            [Rworld pworld]
+            (if (neg? pidx)
+              [Ri-in-parent pi-in-parent]
+              (let [Rparent (get-in out [pidx :R])
+                    pparent (get-in out [pidx :p])]
+                [(mat3-mul Rparent Ri-in-parent)
+                 (vec (map + (mat3-vec Rparent pi-in-parent) pparent))]))]
+        (recur (inc i) (conj out {:R Rworld :p pworld}))))))
+
+;; ── Geometric Jacobian ────────────────────────────────────────────────────
+
+(defn- is-ancestor [built ancestor descendant]
+  (loop [cur descendant]
+    (cond
+      (neg? cur)            false
+      (= cur ancestor)      true
+      :else                 (recur (get-in built [:parent-joint cur])))))
+
+(defn geometric-jacobian
+  "6×n geometric Jacobian (Featherstone [ω; v]: rows 0-2 angular, 3-5 linear)
+  at `target-joint-idx`'s frame (optionally offset by `point-offset-body`)."
+  ([built q target-joint-idx]
+   (geometric-jacobian built q target-joint-idx nil))
+  ([built q target-joint-idx point-offset-body]
+   (let [n (:n built)]
+     (when (or (neg? target-joint-idx) (>= target-joint-idx n))
+       (throw (ex-info (str "geometric-jacobian: target-joint-idx=" target-joint-idx
+                            " out of range [0, " n ")") {:target target-joint-idx :n n})))
+     (let [poses (forward-kinematics built q)
+           {Rtarget :R ptarget-orig :p} (poses target-joint-idx)
+           ptarget (if point-offset-body
+                     (do (when (not= 3 (count point-offset-body))
+                           (throw (ex-info "point-offset-body must be 3-vec" {:got (count point-offset-body)})))
+                         (vec (map + ptarget-orig (mat3-vec Rtarget point-offset-body))))
+                     ptarget-orig)
+           J (atom (vec (repeat 6 (vec (repeat n 0)))))]
+       (doseq [i (range n)]
+         (when (is-ancestor built i target-joint-idx)
+           (let [{Rworld :R pworld :p} (poses i)
+                 a-world (mat3-vec Rworld (get-in built [:joint-axis i]))
+                 kind    (get-in built [:joint-kinds i])]
+             (if (or (= kind "revolute") (= kind "continuous"))
+               (let [dp     (vec (map - ptarget pworld))
+                     linear [(- (* (a-world 1) (dp 2)) (* (a-world 2) (dp 1)))
+                             (- (* (a-world 2) (dp 0)) (* (a-world 0) (dp 2)))
+                             (- (* (a-world 0) (dp 1)) (* (a-world 1) (dp 0)))]]
+                 (doseq [k (range 3)]
+                   (swap! J assoc-in [k i]       (a-world k))
+                   (swap! J assoc-in [(+ k 3) i] (linear k))))
+               (when (= kind "prismatic")
+                 (doseq [k (range 3)]
+                   (swap! J assoc-in [(+ k 3) i] (a-world k))))))))
+       @J))))

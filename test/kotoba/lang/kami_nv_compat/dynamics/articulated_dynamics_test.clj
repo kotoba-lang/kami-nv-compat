@@ -97,3 +97,29 @@
     (is (= [0 0 0] (:q s)))
     (is (= [0 0 0] (:qdot s)))
     (is (= [0 0 0] (:qddot s)))))
+
+(deftest forward-kinematics-test
+  (let [b (ad/build-articulation one-joint-sys)]
+    (testing "q=0: identity rotation, link1 offset up by the joint origin"
+      (let [poses (ad/forward-kinematics b [0])]
+        (is (= 1 (count poses)))
+        (is (mat-close? (:R (first poses)) i3 1e-12))
+        (is (vec-close? (:p (first poses)) [0 0 1] 1e-12))))
+    (testing "q=π/2 about z rotates x -> y, position unchanged"
+      (let [pose (first (ad/forward-kinematics b [(/ Math/PI 2)]))
+            x->   (mapv #(reduce + (map * [1 0 0] %)) (:R pose))]
+        (is (< (Math/abs (- (x-> 0) 0.0)) 1e-9))
+        (is (< (Math/abs (- (x-> 1) 1.0)) 1e-9))
+        (is (vec-close? (:p pose) [0 0 1] 1e-9))))))
+
+(deftest geometric-jacobian-test
+  (testing "1-DoF revolute about z at q=0: angular column = [0 0 1], linear = 0"
+    (let [b (ad/build-articulation one-joint-sys)
+          J (ad/geometric-jacobian b [0] 0)]
+      (is (= 6 (count J)))
+      (is (= 1 (count (first J))))                          ; 6 × 1
+      (is (< (Math/abs (- (get-in J [2 0]) 1.0)) 1e-12))    ; angular z
+      (is (< (Math/abs (- (get-in J [5 0]) 0.0)) 1e-12))))  ; linear z (dp=0 -> 0)
+  (testing "target-joint-idx out of range throws"
+    (let [b (ad/build-articulation one-joint-sys)]
+      (is (thrown? clojure.lang.ExceptionInfo (ad/geometric-jacobian b [0] 5))))))
