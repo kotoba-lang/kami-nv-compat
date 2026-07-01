@@ -37,7 +37,7 @@
 
 (deftest transform-math
   (let [t (w/transform-identity)]
-    (is (= [5 0 0] (w/transform-point (assoc t :p [5 0 0]) [0 0 0])))))
+    (is (= [5.0 0.0 0.0] (w/transform-point (assoc t :p [5.0 0.0 0.0]) [0.0 0.0 0.0])))))
 
 (deftest wp-array-and-atomics
   (let [arr (w/wp-zeros :int32 3)]
