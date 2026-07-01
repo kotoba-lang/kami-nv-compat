@@ -7,19 +7,19 @@
   (testing "writes into :applied-torques, extending if needed"
     (let [env {:applied-torques (atom [0 0 0])}]
       (ae/write-effort! env [[0 1.5] [1 2.5]])
-      (is (= [1.5 2.5 0] @@(:applied-torques env))))))
+      (is (= [1.5 2.5 0] @(:applied-torques env))))))
 
 (deftest write-effort-force-buffer
   (testing "single-DoF force dispatch when joint=0 and single-dof-force-ok"
     (let [env {:applied-force (atom 0)}]
       (ae/write-effort! env [[0 3.14]])
-      (is (= 3.14 @@(:applied-force env))))))
+      (is (= 3.14 @(:applied-force env))))))
 
 (deftest write-effort-actions-buffer
   (testing "falls through to :actions[0]"
     (let [env {:actions (atom [[0 0 0]])}]
       (ae/write-effort! env [[1 5.0] [2 7.0]])
-      (is (= [[0 5.0 7.0]] @@(:actions env))))))
+      (is (= [[0 5.0 7.0]] @(:actions env))))))
 
 (deftest write-effort-no-buffer
   (is (thrown? clojure.lang.ExceptionInfo (ae/write-effort! {} [[0 1.0]]))))
