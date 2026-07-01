@@ -4,8 +4,7 @@
   processes one slice of the policy's flat action vector (process-actions! →
   scale + offset), then writes the result onto the env (apply-actions!).
   ActionManager composes multiple terms into a single combined action vector.
-  Wave 16c of ADR-2607020130."
-  (:require [clojure.string :as str]))
+  Wave 16c of ADR-2607020130.")
 
 (defprotocol IActionTerm
   (action-dim       [this])
