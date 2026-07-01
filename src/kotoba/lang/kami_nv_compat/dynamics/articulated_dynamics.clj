@@ -79,3 +79,84 @@
                            (assoc-in [(+ i 3) j]       (get-in mSkCt [i j]))
                            (assoc-in [(+ i 3) (+ j 3)] (if (= i j) mass 0))))))
     @I))
+
+;; ── Plücker transform + joint motion subspace (build helpers) ─────────────
+
+(defn- plucker-transform [rot-child-to-parent r]
+  (let [Rt (mat3-t rot-child-to-parent)
+        RtSkr (mat3-mul Rt (skew3 r))
+        out (atom (zeros66))]
+    (doseq [i (range 3) j (range 3)]
+      (swap! out (fn [m] (-> m
+                             (assoc-in [i j]             (get-in Rt [i j]))
+                             (assoc-in [(+ i 3) j]       (- (get-in RtSkr [i j])))
+                             (assoc-in [(+ i 3) (+ j 3)] (get-in Rt [i j]))))))
+    @out))
+
+(defn- joint-motion-subspace [joint]
+  (let [[ax ay az] (:axis joint)
+        n (Math/sqrt (+ (* ax ax) (* ay ay) (* az az)))]
+    (if (< n 1e-12)
+      [0 0 0 0 0 0]
+      (let [ux (/ ax n) uy (/ ay n) uz (/ az n)]
+        (condp = (:kind joint)
+          "revolute"   [ux uy uz 0 0 0]
+          "continuous" [ux uy uz 0 0 0]
+          "prismatic"  [0 0 0 ux uy uz]
+          [0 0 0 0 0 0])))))                       ; fixed
+
+;; ── BuiltArticulation ─────────────────────────────────────────────────────
+
+(defn build-articulation
+  "Build the runtime articulation model from a parsed URDF system. Fixed joints
+  are fused; :parent-joint is -1 for joints rooted at the base link."
+  [sys]
+  (let [children (set (map :child (:joints sys)))
+        base-links (filter #(not (contains? children (:name %))) (:links sys))]
+    (when (not= 1 (count base-links))
+      (throw (ex-info (str "build-articulation: expected exactly 1 base link; found "
+                           (count base-links)) {:base-links (mapv :name base-links)})))
+    (let [base-name (:name (first base-links))
+          link-by-name (into {} (for [l (:links sys)] [(:name l) l]))
+          moving (vec (filter #(not= (:kind %) "fixed") (:joints sys)))
+          n (count moving)]
+      (if (zero? n)
+        {:n 0 :joint-names [] :joint-kinds [] :parent-joint [] :motion-subspace []
+         :fixed-origin-transform [] :child-link-inertia [] :joint-damping []
+         :joint-friction [] :rpy-rotation-matrix [] :xyz-translation [] :joint-axis []}
+        (let [link->parent-joint (into {} (map-indexed (fn [i j] [(:child j) i]) moving))
+              parent-joint (vec (for [j moving]
+                                  (loop [cursor (:parent j) pidx -1 guard 0]
+                                    (cond
+                                      (or (>= guard 1000) (= cursor base-name)) pidx
+                                      (link->parent-joint cursor)                (link->parent-joint cursor)
+                                      :else (if-let [upstream (first (filter #(= (:child %) cursor) (:joints sys)))]
+                                              (recur (:parent upstream) pidx (inc guard))
+                                              pidx)))))
+              joint-axis (vec (for [j moving]
+                                (let [[ax ay az] (:axis j)
+                                      an (Math/sqrt (+ (* ax ax) (* ay ay) (* az az)))]
+                                  (if (< an 1e-12) [0 0 1] [(/ ax an) (/ ay an) (/ az an)]))))]
+          {:n n
+           :joint-names  (mapv :name moving)
+           :joint-kinds  (mapv :kind moving)
+           :parent-joint parent-joint
+           :motion-subspace     (mapv joint-motion-subspace moving)
+           :fixed-origin-transform (vec (for [j moving]
+                                          (plucker-transform (rot-from-rpy (get-in j [:origin :rpy]))
+                                                             (get-in j [:origin :xyz]))))
+           :child-link-inertia   (vec (for [j moving]
+                                        (let [link (link-by-name (:child j))]
+                                          (when-not link
+                                            (throw (ex-info (str "build-articulation: missing child link " (:child j)) {})))
+                                          (spatial-inertia-from-link link))))
+           :joint-damping   (mapv #(get % :damping 0) moving)
+           :joint-friction  (mapv #(get % :friction 0) moving)
+           :rpy-rotation-matrix (mapv #(rot-from-rpy (get-in % [:origin :rpy])) moving)
+           :xyz-translation     (mapv #(get-in % [:origin :xyz]) moving)
+           :joint-axis          joint-axis})))))
+
+(defn make-zero-state
+  "Zero generalized coords/velocities/accelerations for an n-DoF articulation."
+  [n]
+  {:q (vec (repeat n 0)) :qdot (vec (repeat n 0)) :qddot (vec (repeat n 0))})
