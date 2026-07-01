@@ -60,8 +60,9 @@
 
 (defn- zeros66 [] (vec (repeat 6 (vec (repeat 6 0)))))
 
-(defn spatial-inertia-from-link [link]
+(defn spatial-inertia-from-link
   "6×6 spatial inertia of a link (mass, full inertia tensor, COM offset)."
+  [link]
   (let [{:keys [mass ixx iyy izz ixy ixz iyz]} (:inertia link)
         c (:xyz (:com (:inertia link)))
         Ic [[ixx ixy ixz] [ixy iyy iyz] [ixz iyz izz]]
