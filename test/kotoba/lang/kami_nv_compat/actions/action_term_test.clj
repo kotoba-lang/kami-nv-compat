@@ -1,52 +1,54 @@
 (ns kotoba.lang.kami-nv-compat.actions.action-term-test
   "ActionTerm + ActionManager coverage."
-  (:require [clojure.test :refer [deftest is testing]]
+  (:require [clojure.test :refer [deftest is]]
             [kotoba.lang.kami-nv-compat.actions.action-term :as at]))
 
-(defn mock-term [cfg]
+(defn mock-term
+  "Returns {:term IActionTerm :state map :applied atom}."
+  [cfg]
   (let [state (at/make-action-term-state cfg)
-        applied (atom nil)]
-    (merge state
-      {:applied applied}
-      (reify at/IActionTerm
-        (action-dim [_] (:action-dim state))
-        (process-actions! [_ raw] (at/base-process-actions! state raw))
-        (apply-actions! [_ env] (reset! applied (:processed-actions state)))
-        (reset-term! [_] (at/base-reset! state))))))
+        applied (atom nil)
+        term (reify at/IActionTerm
+                (action-dim [_] (:action-dim state))
+                (process-actions! [_ raw] (at/base-process-actions! state raw))
+                (apply-actions! [_ _env] (reset! applied @(:processed-actions state)))
+                (reset-term! [_] (at/base-reset! state)))]
+    {:term term :state state :applied applied}))
 
 (deftest action-term-process
-  (let [t (mock-term {:joint-names [0 1 2] :scale 2.0 :offset 1.0})]
-    (at/process-actions! t [1 2 3])
-    (is (= [1 2 3] @(:raw-actions t)))
-    (is (= [3.0 5.0 7.0] @(:processed-actions t)))))   ; 1*2+1, 2*2+1, 3*2+1
+  (let [m (mock-term {:joint-names [0 1 2] :scale 2.0 :offset 1.0})]
+    (at/process-actions! (:term m) [1 2 3])
+    (is (= [1 2 3] @(:raw-actions (:state m))))
+    (is (= [3.0 5.0 7.0] @(:processed-actions (:state m))))))
 
 (deftest action-term-reset
-  (let [t (mock-term {:joint-names [0 1]})]
-    (at/process-actions! t [5 6])
-    (at/reset-term! t)
-    (is (= [0 0] @(:raw-actions t)))
-    (is (= [0 0] @(:processed-actions t)))))
+  (let [m (mock-term {:joint-names [0 1]})]
+    (at/process-actions! (:term m) [5 6])
+    (at/reset-term! (:term m))
+    (is (= [0 0] @(:raw-actions (:state m))))
+    (is (= [0 0] @(:processed-actions (:state m))))))
 
 (deftest action-term-validation
   (is (thrown? clojure.lang.ExceptionInfo (at/make-action-term-state {:joint-names []})))
-  (let [t (mock-term {:joint-names [0 1 2]})]
-    (is (thrown? clojure.lang.ExceptionInfo (at/process-actions! t [1 2])))))
+  (let [m (mock-term {:joint-names [0 1 2]})]
+    (is (thrown? clojure.lang.ExceptionInfo (at/process-actions! (:term m) [1 2])))))
 
 (deftest action-manager-compose
-  (let [t1 (mock-term {:joint-names [0 1]})
-        t2 (mock-term {:joint-names [2]})
-        mgr (at/action-manager [t1 t2])]
+  (let [m1 (mock-term {:joint-names [0 1]})
+        m2 (mock-term {:joint-names [2]})
+        mgr (at/action-manager [(:term m1) (:term m2)])]
     (is (= 3 (:total-action-dim mgr)))
     (at/manager-process-actions! mgr [10 20 30])
-    (is (= [10 20] @(:processed-actions t1)))
-    (is (= [30] @(:processed-actions t2)))
+    (is (= [10 20] @(:processed-actions (:state m1))))
+    (is (= [30] @(:processed-actions (:state m2))))
     (at/manager-apply-actions! mgr {})
-    (is (= [10 20] @(:applied t1)))
-    (is (= [30] @(:applied t2)))
+    (is (= [10 20] @(:applied m1)))
+    (is (= [30] @(:applied m2)))
     (at/manager-reset! mgr)
-    (is (= [0 0] @(:raw-actions t1)))))
+    (is (= [0 0] @(:raw-actions (:state m1))))))
 
 (deftest action-manager-validation
   (is (thrown? clojure.lang.ExceptionInfo (at/action-manager [])))
-  (let [mgr (at/action-manager [(mock-term {:joint-names [0]})])]
+  (let [m (mock-term {:joint-names [0]})
+        mgr (at/action-manager [(:term m)])]
     (is (thrown? clojure.lang.ExceptionInfo (at/manager-process-actions! mgr [1 2])))))
