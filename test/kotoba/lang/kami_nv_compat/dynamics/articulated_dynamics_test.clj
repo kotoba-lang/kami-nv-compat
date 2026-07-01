@@ -123,3 +123,34 @@
   (testing "target-joint-idx out of range throws"
     (let [b (ad/build-articulation one-joint-sys)]
       (is (thrown? clojure.lang.ExceptionInfo (ad/geometric-jacobian b [0] 5))))))
+
+(def pendulum-sys
+  {:name "p"
+   :links [{:name "base" :inertia unit-link}
+           {:name "l1" :inertia (assoc unit-link :com {:xyz [0.1 0 0] :rpy [0 0 0]})}]
+   :joints [{:name "j0" :kind "revolute" :parent "base" :child "l1"
+             :origin {:xyz [0 0 1] :rpy [0 0 0]} :axis [0 1 0]}]})
+
+(deftest crba-symmetric
+  (let [M (ad/crba-mass-matrix (ad/build-articulation two-joint-sys) [0.1 0.2])]
+    (is (= 2 (count M)))
+    (doseq [i (range 2) j (range 2)]
+      (is (< (Math/abs (- (get-in M [i j]) (get-in M [j i]))) 1e-9)))
+    (is (pos? (get-in M [0 0])))))
+
+(deftest aba-rnea-consistency
+  (let [b (ad/build-articulation pendulum-sys)
+        tau (ad/rnea-inverse-dynamics b [0.3] [0.5] [0.7])
+        qddot' (ad/aba-forward b [0.3] [0.5] tau)]
+    (is (= 1 (count qddot')))
+    (is (< (Math/abs (- (first qddot') 0.7)) 1e-6))))
+
+(deftest rnea-gravity-nonzero
+  (is (not (zero? (first (ad/rnea-inverse-dynamics (ad/build-articulation pendulum-sys) [0.5] [0] [0]))))))
+
+(deftest kinetic-energy-positive
+  (is (pos? (ad/kinetic-energy (ad/build-articulation one-joint-sys) [0.0] [1.0]))))
+
+(deftest articulated-step-test
+  (let [s (ad/articulated-step (ad/build-articulation one-joint-sys) (ad/make-zero-state 1) [0.5] 0.01)]
+    (is (= 1 (count (:q s))))))

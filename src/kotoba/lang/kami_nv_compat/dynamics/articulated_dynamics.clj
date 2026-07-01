@@ -241,3 +241,194 @@
                  (doseq [k (range 3)]
                    (swap! J assoc-in [(+ k 3) i] (a-world k))))))))
        @J))))
+
+;; ── 6×6 spatial-matrix helpers ───────────────────────────────────────────
+
+(defn- mat66-mul [a b]
+  (vec (for [i (range 6)] (vec (for [j (range 6)]
+    (loop [k 0 s 0] (if (>= k 6) s (recur (inc k) (+ s (* (get-in a [i k]) (get-in b [k j])))))))))))
+
+(defn- mat66-t [a] (vec (for [i (range 6)] (vec (for [j (range 6)] (get-in a [j i]))))))
+
+(defn- mat66-vec [a v]
+  (vec (for [i (range 6)] (loop [k 0 s 0] (if (>= k 6) s (recur (inc k) (+ s (* (get-in a [i k]) (v k)))))))))
+
+(defn- mat66-scale [a s] (vec (for [i (range 6)] (vec (for [j (range 6)] (* (get-in a [i j]) s))))))
+
+(defn- mat66-sub [a b] (vec (for [i (range 6)] (vec (for [j (range 6)] (- (get-in a [i j]) (get-in b [i j])))))))
+
+(defn- mat66-add [a b] (vec (for [i (range 6)] (vec (for [j (range 6)] (+ (get-in a [i j]) (get-in b [i j])))))))
+
+(defn- vec6-add [a b] (vec (for [i (range 6)] (+ (a i) (b i)))))
+(defn- vec6-scale [a s] (vec (for [i (range 6)] (* (a i) s))))
+(defn- vec6-dot [a b] (loop [i 0 s 0] (if (>= i 6) s (recur (inc i) (+ s (* (a i) (b i)))))))
+(defn- outer6 [a b] (vec (for [i (range 6)] (vec (for [j (range 6)] (* (a i) (b j)))))))
+
+(defn- spatial-cross-motion [v]
+  (let [skw (skew3 [(v 0) (v 1) (v 2)]) sku (skew3 [(v 3) (v 4) (v 5)]) out (atom (zeros66))]
+    (doseq [i (range 3) j (range 3)]
+      (swap! out (fn [m] (-> m (assoc-in [i j] (get-in skw [i j])) (assoc-in [(+ i 3) j] (get-in sku [i j])) (assoc-in [(+ i 3) (+ j 3)] (get-in skw [i j]))))))
+    @out))
+
+(defn- spatial-cross-force [v]
+  (let [skw (skew3 [(v 0) (v 1) (v 2)]) sku (skew3 [(v 3) (v 4) (v 5)]) out (atom (zeros66))]
+    (doseq [i (range 3) j (range 3)]
+      (swap! out (fn [m] (-> m (assoc-in [i j] (get-in skw [i j])) (assoc-in [i (+ j 3)] (get-in sku [i j])) (assoc-in [(+ i 3) (+ j 3)] (get-in skw [i j]))))))
+    @out))
+
+(defn- identity3 [] [[1 0 0] [0 1 0] [0 0 1]])
+(defn- identity6 [] (let [out (atom (zeros66))] (doseq [i (range 6)] (swap! out assoc-in [i i] 1)) @out))
+
+(defn- joint-motion-transform [kind axis-unit q]
+  (condp = kind
+    "revolute"   (plucker-transform (rodrigues-rotation axis-unit q) [0 0 0])
+    "continuous" (plucker-transform (rodrigues-rotation axis-unit q) [0 0 0])
+    "prismatic"  (plucker-transform (identity3) [(* q (axis-unit 0)) (* q (axis-unit 1)) (* q (axis-unit 2))])
+    (identity6)))
+
+(defn- compute-joint-transforms [built q]
+  (vec (for [i (range (:n built))]
+    (mat66-mul (joint-motion-transform (get-in built [:joint-kinds i]) (get-in built [:joint-axis i]) (q i))
+               (get-in built [:fixed-origin-transform i])))))
+
+;; ── RNEA inverse dynamics ─────────────────────────────────────────────────
+
+(defn- rnea-compute
+  [built q qdot qddot gravity n]
+  (let [X (compute-joint-transforms built q)
+        v (atom []) a (atom []) f (atom [])
+        a-base [0 0 0 (- (gravity 0)) (- (gravity 1)) (- (gravity 2))]]
+    (dotimes [i n]
+      (let [Si (get-in built [:motion-subspace i])
+            Sq (vec6-scale Si (qdot i))
+            Sqd (vec6-scale Si (qddot i))
+            pidx (get-in built [:parent-joint i])
+            vp-in (if (neg? pidx) [0 0 0 0 0 0] (mat66-vec (X i) (@v pidx)))
+            ap-in (if (neg? pidx) (mat66-vec (X i) a-base) (mat66-vec (X i) (@a pidx)))
+            vi (vec6-add vp-in Sq)]
+        (swap! v conj vi)
+        (swap! a conj (vec6-add (vec6-add ap-in Sqd) (mat66-vec (spatial-cross-motion vi) Sq)))
+        (let [Ii (get-in built [:child-link-inertia i])]
+          (swap! f conj (vec6-add (mat66-vec Ii (@a i)) (mat66-vec (spatial-cross-force vi) (mat66-vec Ii vi)))))))
+    (let [tau (atom (vec (repeat n 0)))]
+      (doseq [k (range n)]
+        (let [i (- n 1 k) Si (get-in built [:motion-subspace i])]
+          (swap! tau assoc i (+ (vec6-dot Si (@f i)) (* (get-in built [:joint-damping i]) (qdot i))))
+          (let [pidx (get-in built [:parent-joint i])]
+            (when (>= pidx 0)
+              (let [Xt (mat66-t (X i))]
+                (swap! f update pidx (fn [old] (vec6-add old (mat66-vec Xt (@f i))))))))))
+      @tau)))
+
+(defn rnea-inverse-dynamics
+  ([built q qdot qddot]
+   (rnea-inverse-dynamics built q qdot qddot [0 0 -9.81]))
+  ([built q qdot qddot gravity]
+   (let [n (:n built)]
+     (if (zero? n) [] (rnea-compute built q qdot qddot gravity n)))))
+
+(defn coriolis-gravity-vector
+  ([built q qdot] (coriolis-gravity-vector built q qdot [0 0 -9.81]))
+  ([built q qdot gravity] (rnea-inverse-dynamics built q qdot (vec (repeat (:n built) 0)) gravity)))
+
+;; ── ABA forward dynamics ─────────────────────────────────────────────────
+
+(defn- aba-pass2!
+  [built X Ia pa c n tau]
+  (let [U (atom (vec (repeat n nil))) D (atom (vec (repeat n 0))) u (atom (vec (repeat n 0)))]
+    (doseq [k (range n)]
+      (let [i (- n 1 k) Si (get-in built [:motion-subspace i])]
+        (swap! U assoc i (mat66-vec (@Ia i) Si))
+        (let [d0 (+ (vec6-dot Si (@U i)) (get-in built [:joint-damping i]))
+              d (if (< (Math/abs d0) 1e-12) 1e-12 d0)]
+          (swap! D assoc i d))
+        (swap! u assoc i (- (tau i) (vec6-dot Si (@pa i))))
+        (let [pidx (get-in built [:parent-joint i])]
+          (when (>= pidx 0)
+            (let [Di (@D i)
+                  Uo (mat66-scale (outer6 (@U i) (@U i)) (/ 1.0 Di))
+                  inner (mat66-sub (@Ia i) Uo)
+                  Xt (mat66-t (X i))
+                  contrib-i (mat66-mul (mat66-mul Xt inner) (X i))
+                  Ia-c (mat66-vec (@Ia i) (@c i))
+                  Uu (vec6-scale (@U i) (/ (@u i) Di))
+                  sum-term (vec6-add (vec6-add (@pa i) Ia-c) Uu)
+                  contrib-p (mat66-vec Xt sum-term)]
+              (swap! Ia update pidx (fn [old] (mat66-add old contrib-i)))
+              (swap! pa update pidx (fn [old] (vec6-add old contrib-p))))))))
+    {:U @U :D @D :u @u}))
+
+(defn- aba-compute
+  [built q qdot tau gravity n]
+  (let [X (compute-joint-transforms built q)
+        v (atom []) c (atom [])
+        Ia (atom (mapv (fn [m] (mapv vec m)) (:child-link-inertia built)))
+        pa (atom [])]
+    (dotimes [i n]
+      (let [Si (get-in built [:motion-subspace i])
+            Sq (vec6-scale Si (qdot i))
+            pidx (get-in built [:parent-joint i])
+            vp-in-i (if (neg? pidx) [0 0 0 0 0 0] (mat66-vec (X i) (@v pidx)))
+            vi (vec6-add vp-in-i Sq)]
+        (swap! v conj vi)
+        (swap! c conj (mat66-vec (spatial-cross-motion vi) Sq))))
+    (dotimes [i n]
+      (let [Iv (mat66-vec (@Ia i) (@v i))]
+        (swap! pa conj (mat66-vec (spatial-cross-force (@v i)) Iv))))
+    (let [{:keys [U D u]} (aba-pass2! built X Ia pa c n tau)
+          a-base [0 0 0 (- (gravity 0)) (- (gravity 1)) (- (gravity 2))]
+          a (atom (vec (repeat n nil)))]
+      (vec (for [i (range n)]
+        (let [pidx (get-in built [:parent-joint i])
+              ap-in (if (neg? pidx) (mat66-vec (X i) a-base) (mat66-vec (X i) (@a pidx)))
+              a-prime (vec6-add ap-in (@c i))
+              qddot-i (/ (- (u i) (vec6-dot (U i) a-prime)) (D i))]
+          (swap! a assoc i (vec6-add a-prime (vec6-scale (get-in built [:motion-subspace i]) qddot-i)))
+          qddot-i))))))
+
+(defn aba-forward
+  ([built q qdot tau] (aba-forward built q qdot tau [0 0 -9.81]))
+  ([built q qdot tau gravity]
+   (let [n (:n built)]
+     (if (zero? n) [] (aba-compute built q qdot tau gravity n)))))
+
+(defn articulated-step
+  ([built state tau dt] (articulated-step built state tau dt [0 0 -9.81]))
+  ([built state tau dt gravity]
+   (let [{:keys [q qdot]} state
+         qddot (aba-forward built q qdot tau gravity)
+         qdot' (vec (map-indexed (fn [i qd] (+ qd (* dt (qddot i)))) qdot))
+         q' (vec (map-indexed (fn [i qi] (+ qi (* dt (qdot' i)))) q))]
+     {:q q' :qdot qdot' :qddot qddot})))
+
+;; ── CRBA: joint-space inertia matrix ──────────────────────────────────────
+
+(defn crba-mass-matrix [built q]
+  (let [n (:n built)]
+    (assert (= (count q) n) (str "crba-mass-matrix: q length must be " n))
+    (if (zero? n) []
+      (let [X (compute-joint-transforms built q)
+            Ic (atom (mapv (fn [m] (mapv vec m)) (:child-link-inertia built)))]
+        (doseq [k (range n)]
+          (let [i (- n 1 k) pidx (get-in built [:parent-joint i])]
+            (when (>= pidx 0)
+              (let [Xt (mat66-t (X i)) contrib (mat66-mul (mat66-mul Xt (@Ic i)) (X i))]
+                (swap! Ic update pidx (fn [old] (mat66-add old contrib)))))))
+        (let [M (atom (vec (repeat n (vec (repeat n 0)))))]
+          (dotimes [i n]
+            (let [Si (get-in built [:motion-subspace i]) F0 (mat66-vec (@Ic i) Si)]
+              (swap! M assoc-in [i i] (vec6-dot Si F0))
+              (loop [j i F F0]
+                (let [pj (get-in built [:parent-joint j])]
+                  (when (>= pj 0)
+                    (let [F' (mat66-vec (mat66-t (X j)) F) Sj (get-in built [:motion-subspace pj])
+                          m-ij (vec6-dot Sj F')]
+                      (swap! M assoc-in [i pj] m-ij)
+                      (swap! M assoc-in [pj i] m-ij)
+                      (recur pj F')))))))
+          @M)))))
+
+(defn kinetic-energy [built q qdot]
+  (let [M (crba-mass-matrix built q) n (:n built)]
+    (* 0.5 (reduce + (for [i (range n)]
+      (* (qdot i) (reduce + (for [j (range n)] (* (get-in M [i j]) (qdot j))))))))))
