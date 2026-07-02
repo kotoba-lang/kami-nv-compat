@@ -1,5 +1,5 @@
 (ns kotoba.lang.kami-nv-compat.wadachi-sim.sensors-test
-  "wadachi-sim.sensors: sensor-pose + LiDAR + radar coverage (camera deferred)."
+  "wadachi-sim.sensors: sensor-pose + camera + LiDAR + radar coverage."
   (:require [clojure.test :refer [deftest is]]
             [kotoba.lang.kami-nv-compat.wadachi-sim.world :as world]
             [kotoba.lang.kami-nv-compat.wadachi-sim.sensors :as sensors]))
@@ -24,6 +24,34 @@
    :actors [{:id "a1" :kind "car" :x 11.5 :y 0.0 :yaw 0.0 :vx -5.0 :vy 0.0 :extent [1.0 1.0 1.0]}]
    :obstacles []
    :ground-half-size 50.0})
+
+(deftest sample-camera-rgb-shape
+  (let [scenario (scenario-with-box-ahead)
+        scene (world/build-sensor-scene scenario)
+        gt (world/ground-truth scenario)
+        cfg {:width 8 :height 8 :vfov-deg 60.0 :mount sensors/default-mount}
+        frame (sensors/sample-camera scenario gt scene cfg)]
+    (is (= 256 (count (:rgb frame)))) ; 8*8*4
+    (is (= 8 (:width frame)))
+    (is (= 8 (:height frame)))))
+
+(deftest sample-camera-boxes-include-onscreen-actor
+  (let [scenario (scenario-with-box-ahead)
+        scene (world/build-sensor-scene scenario)
+        gt (world/ground-truth scenario)
+        cfg {:width 8 :height 8 :vfov-deg 60.0 :mount sensors/default-mount}
+        frame (sensors/sample-camera scenario gt scene cfg)]
+    (is (= 1 (count (:boxes frame))))
+    (is (= "a1" (:id (first (:boxes frame)))))
+    (is (= 4 (count (:bbox2d (first (:boxes frame))))))))
+
+(deftest sample-camera-boxes-empty-when-nothing-in-scene
+  (let [scenario {:ego stationary-ego :actors [] :obstacles [] :ground-half-size 0.0}
+        scene (world/build-sensor-scene scenario)
+        gt (world/ground-truth scenario)
+        cfg {:width 8 :height 8 :vfov-deg 60.0 :mount sensors/default-mount}
+        frame (sensors/sample-camera scenario gt scene cfg)]
+    (is (empty? (:boxes frame)))))
 
 (deftest sample-lidar-single-ray-hits-box-ahead
   (let [scenario (scenario-with-box-ahead)
