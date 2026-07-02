@@ -1,22 +1,23 @@
 (ns kotoba.lang.kami-nv-compat.wadachi-sim.sensors
-  "wadachi-sim — clean-room sensor models (LiDAR / radar). Portable .cljc
-  port of src/wadachi-sim/sensors.ts. Wave 29 (partial).
+  "wadachi-sim — clean-room sensor models (camera / LiDAR / radar). Portable
+  .cljc port of src/wadachi-sim/sensors.ts. Wave 29 (partial) + wave 33
+  (sample-camera, unblocked by utsushimi.render-bridge; closes this file).
 
   DriveSim's value is sensor-realistic ground truth; these models reproduce
-  that on the kami-rt ray tracer:
-    - LidarSensor : BVH ray-cast scan -> range image + 3D point cloud
-    - RadarSensor : per-object range / azimuth / radial-velocity detections
+  that on the kami-rt ray tracer + the utsushimi camera projection:
+    - CameraSensor : kami-rt RGB frame + projected 2D bounding-box ground truth
+    - LidarSensor  : BVH ray-cast scan -> range image + 3D point cloud
+    - RadarSensor  : per-object range / azimuth / radial-velocity detections
 
   All sensors are mounted on the ego with a planar offset + yaw and a mast
   height; their forward axis follows the ego heading. Deterministic,
   CPU-only.
 
-  sample-camera is DEFERRED — it needs utsushimi's make-proj-camera /
-  project-aabb (not yet ported); sensor-pose / sample-lidar / sample-radar
-  are self-contained on kami-rt (already ported).
-
   ADR-2605261800 SD1/D6 (DriveSim -> wadachi-sim)."
-  (:require [kotoba.lang.kami-nv-compat.kami-rt.bvh :as bvh]))
+  (:require [kotoba.lang.kami-nv-compat.kami-rt.bvh :as bvh]
+            [kotoba.lang.kami-nv-compat.kami-rt.index :as kami-rt]
+            [kotoba.lang.kami-nv-compat.utsushimi.render-bridge :as rb]
+            [kotoba.lang.kami-nv-compat.wadachi-sim.world :as world]))
 
 ;; ── sensor mount ─────────────────────────────────────────────────────────
 ;;
@@ -36,6 +37,29 @@
                 (+ (:y ego) (* (:forward mount) s) (* (:left mount) c))
                 (:height mount)]]
     {:origin origin :heading (+ (:yaw ego) (:yaw mount))}))
+
+;; ── camera sensor ────────────────────────────────────────────────────────
+;;
+;; CameraConfig {:width :height :vfov-deg :mount}
+;; CameraBox {:id :kind :bbox2d}
+;; CameraFrame {:rgb :boxes :width :height}
+
+(defn sample-camera
+  "Render an RGB frame + projected 2D ground-truth boxes for the scenario."
+  [scenario gt scene cfg]
+  (let [{:keys [origin heading]} (sensor-pose (:ego scenario) (:mount cfg))
+        target [(+ (origin 0) (Math/cos heading)) (+ (origin 1) (Math/sin heading)) (origin 2)]
+        up [0.0 0.0 1.0]
+        aspect (/ (double (:width cfg)) (:height cfg))
+        cam (bvh/look-at origin target up (:vfov-deg cfg) aspect)
+        rgb (:framebuffer (kami-rt/trace-image-cpu scene cam (:width cfg) (:height cfg)))
+        proj (rb/make-proj-camera origin target up (:vfov-deg cfg) aspect)
+        boxes (keep (fn [o]
+                      (let [aabb (world/world-aabb ((:center o) 0) ((:center o) 1) (:extent o) (:yaw o))
+                            bbox (rb/project-aabb proj (:min aabb) (:max aabb) (:width cfg) (:height cfg))]
+                        (when bbox {:id (:id o) :kind (:kind o) :bbox2d bbox})))
+                    gt)]
+    {:rgb rgb :boxes (vec boxes) :width (:width cfg) :height (:height cfg)}))
 
 ;; ── LiDAR sensor ─────────────────────────────────────────────────────────
 ;;
