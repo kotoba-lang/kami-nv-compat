@@ -560,3 +560,140 @@
           {:binding 7 :kind :uniform :input-index 7 :writeback false}]
          (:bindings ex/terminations-kernel)))
   (is (= 64 (:workgroup-size ex/terminations-kernel))))
+
+;; ── mlp-policy-forward-inline / mlp-policy-forward-kernel ─────────────────
+
+(deftest mlp-policy-forward-inline-single-neuron-matches-hand-derived-tanh
+  (testing "1 obs, 1 hidden, 1 action: obs=2, W1=3, b1=-1 -> hidden pre-act
+            = 3*2-1 = 5, ReLU(5)=5; W2=0.5, b2=0.1 -> out pre-act =
+            0.5*5+0.1 = 2.6 -> tanh(2.6), computed independently via the
+            raw exp-based tanh identity (e^2x-1)/(e^2x+1), not by calling
+            back into any tanh helper"
+    (let [result (ex/mlp-policy-forward-inline [2.0] [3.0] [-1.0] [0.5] [0.1] 1 1 1)
+          e (Math/exp (* 2 2.6))
+          hand-tanh (/ (- e 1) (+ e 1))]
+      (is (close? (first result) hand-tanh 1e-12)))))
+
+(deftest mlp-policy-forward-inline-relu-clamps-negative-hidden-pre-activation
+  (testing "W1=-3, obs=2, b1=-1 -> hidden pre-act = -7 -> ReLU clamps to 0,
+            so the output only depends on b2: tanh(0.5*0+0.2) = tanh(0.2)"
+    (let [result (ex/mlp-policy-forward-inline [2.0] [-3.0] [-1.0] [0.5] [0.2] 1 1 1)]
+      (is (close? (first result) (Math/tanh 0.2) 1e-12)))))
+
+(deftest mlp-policy-forward-inline-batches-independent-envs
+  (testing "2 envs, obs-dim=1, hidden-dim=2, action-dim=2 -- each env's
+            hidden/action values hand-derived independently of the
+            function under test"
+    (let [obs [1.0 2.0] W1 [1.0 2.0] b1 [0.0 0.0]
+          W2 [1.0 1.0 0.5 0.5] b2 [0.0 0.0]
+          result (ex/mlp-policy-forward-inline obs W1 b1 W2 b2 1 2 2)
+          ;; env0: hidden=[ReLU(1*1)=1, ReLU(2*1)=2]; a0=tanh(1+2)=tanh(3); a1=tanh(0.5+1)=tanh(1.5)
+          ;; env1: hidden=[ReLU(1*2)=2, ReLU(2*2)=4]; a0=tanh(2+4)=tanh(6); a1=tanh(1+2)=tanh(3)
+          expected [(Math/tanh 3) (Math/tanh 1.5) (Math/tanh 6) (Math/tanh 3)]]
+      (is (= (count expected) (count result)))
+      (is (every? true? (map #(close? %1 %2 1e-12) result expected))))))
+
+(deftest mlp-policy-forward-kernel-matches-mlp-policy-forward-inline
+  (testing "dispatched through warp.warp/launch + WpArray plumbing, the
+            kernel's :js path gives the identical result to calling
+            mlp-policy-forward-inline directly"
+    (let [obs [1.0 2.0] W1 [1.0 2.0] b1 [0.0 0.0]
+          W2 [1.0 1.0 0.5 0.5] b2 [0.0 0.0]
+          obs-a (wp/wp-array obs) W1-a (wp/wp-array W1) b1-a (wp/wp-array b1)
+          W2-a (wp/wp-array W2) b2-a (wp/wp-array b2)
+          action-out (wp/wp-array (vec (repeat 4 0.0)))]
+      (wp/launch {:kernel-fn (:fn ex/mlp-policy-forward-kernel) :dim 2
+                  :inputs [obs-a W1-a b1-a W2-a b2-a action-out 1 2 2]})
+      (is (= (ex/mlp-policy-forward-inline obs W1 b1 W2 b2 1 2 2) @action-out)))))
+
+(deftest mlp-policy-forward-kernel-registers-correct-bindings
+  (is (= [{:binding 0 :kind :storage :input-index 0 :writeback false}
+          {:binding 1 :kind :storage :input-index 1 :writeback false}
+          {:binding 2 :kind :storage :input-index 2 :writeback false}
+          {:binding 3 :kind :storage :input-index 3 :writeback false}
+          {:binding 4 :kind :storage :input-index 4 :writeback false}
+          {:binding 5 :kind :storage :input-index 5 :writeback true}
+          {:binding 6 :kind :uniform :input-index 6 :writeback false}]
+         (:bindings ex/mlp-policy-forward-kernel)))
+  (is (= 64 (:workgroup-size ex/mlp-policy-forward-kernel))))
+
+;; ── conditional-reset-inline / conditional-reset-kernel ───────────────────
+
+(deftest conditional-reset-inline-copies-only-done-envs
+  (testing "d=2 (2 floats/env), 2 envs: env0 done -> its 2 slots get
+            reset-state; env1 not-done -> its 2 slots keep state"
+    (let [result (ex/conditional-reset-inline
+                   [10.0 11.0 20.0 21.0] [100.0 101.0 200.0 201.0] [1.0 0.0] 2)]
+      (is (= [100.0 101.0 20.0 21.0] result)))))
+
+(deftest conditional-reset-boundary-at-exactly-half-resets
+  (testing "done == 0.5 exactly is >= 0.5, so it resets (boundary inclusive)"
+    (is (= [9.0] (ex/conditional-reset-inline [1.0] [9.0] [0.5] 1)))))
+
+(deftest conditional-reset-boundary-just-below-half-does-not-reset
+  (testing "done just under 0.5 does not reset (boundary exclusive below)"
+    (is (= [1.0] (ex/conditional-reset-inline [1.0] [9.0] [0.4999999] 1)))))
+
+(deftest conditional-reset-kernel-matches-conditional-reset-inline
+  (testing "dispatched through warp.warp/launch + WpArray plumbing, the
+            kernel's :js path (in-place mutation of the state WpArray)
+            gives the identical result to conditional-reset-inline's pure
+            return value"
+    (let [state [10.0 11.0 20.0 21.0] reset-state [100.0 101.0 200.0 201.0] done [1.0 0.0]
+          state-a (wp/wp-array state) reset-a (wp/wp-array reset-state) done-a (wp/wp-array done)]
+      (wp/launch {:kernel-fn (:fn ex/conditional-reset-kernel) :dim 4
+                  :inputs [state-a reset-a done-a 2]})
+      (is (= (ex/conditional-reset-inline state reset-state done 2) @state-a)))))
+
+(deftest conditional-reset-kernel-registers-correct-bindings
+  (is (= [{:binding 0 :kind :storage :input-index 0 :writeback true}
+          {:binding 1 :kind :storage :input-index 1 :writeback false}
+          {:binding 2 :kind :storage :input-index 2 :writeback false}
+          {:binding 3 :kind :uniform :input-index 3 :writeback false}]
+         (:bindings ex/conditional-reset-kernel)))
+  (is (= 64 (:workgroup-size ex/conditional-reset-kernel))))
+
+;; ── ground-contact-inline / ground-contact-kernel ─────────────────────────
+
+(deftest ground-contact-inline-matches-hand-derived-forces
+  (testing "4 feet, ground_z=0, Kp=100, Kd=10:
+            foot0 pz=0.0 (penetration=0, not >0) -> fz=0
+            foot1 pz=-0.01, vz=0 -> raw=100*0.01-10*0=1.0 -> fz=1.0
+            foot2 pz=-0.01, vz=5.0 -> raw=1.0-50.0=-49.0 -> clamped to 0
+            foot3 pz=0.02 (above ground, penetration<0) -> fz=0"
+    (let [p-world [0 0 0.0,  0 0 -0.01,  0 0 -0.01,  0 0 0.02]
+          v-world [0 0 0.0,  0 0 0.0,    0 0 5.0,    0 0 0.0]
+          result (ex/ground-contact-inline p-world v-world 0.0 100.0 10.0)]
+      (is (= [0 0 0  0 0 1.0  0 0 0  0 0 0] result)))))
+
+(deftest ground-contact-boundary-zero-penetration-yields-no-force
+  (testing "pz == ground_z exactly (penetration=0) must NOT enter the >0
+            branch, even with a huge downward velocity that would
+            otherwise dominate the damping term"
+    (is (= [0 0 0] (ex/ground-contact-inline [0 0 5.0] [0 0 -100.0] 5.0 100.0 10.0)))))
+
+(deftest ground-contact-just-above-threshold-yields-tiny-positive-force
+  (testing "penetration = 1e-9 (just above the >0 threshold) with vz=0 ->
+            fz = Kp*1e-9 = 100*1e-9 = 1e-7"
+    (let [[_ _ fz] (ex/ground-contact-inline [0 0 (- 5.0 1e-9)] [0 0 0.0] 5.0 100.0 10.0)]
+      (is (close? fz 1e-7 1e-12)))))
+
+(deftest ground-contact-kernel-matches-ground-contact-inline
+  (testing "dispatched through warp.warp/launch + WpArray plumbing, the
+            kernel's :js path gives the identical result to calling
+            ground-contact-inline directly"
+    (let [p-world [0 0 0.0,  0 0 -0.01,  0 0 -0.01,  0 0 0.02]
+          v-world [0 0 0.0,  0 0 0.0,    0 0 5.0,    0 0 0.0]
+          p-a (wp/wp-array p-world) v-a (wp/wp-array v-world)
+          f-out (wp/wp-array (vec (repeat 12 0.0)))]
+      (wp/launch {:kernel-fn (:fn ex/ground-contact-kernel) :dim 4
+                  :inputs [p-a v-a f-out 0.0 100.0 10.0]})
+      (is (= (ex/ground-contact-inline p-world v-world 0.0 100.0 10.0) @f-out)))))
+
+(deftest ground-contact-kernel-registers-correct-bindings
+  (is (= [{:binding 0 :kind :storage :input-index 0 :writeback false}
+          {:binding 1 :kind :storage :input-index 1 :writeback false}
+          {:binding 2 :kind :storage :input-index 2 :writeback true}
+          {:binding 3 :kind :uniform :input-index 3 :writeback false}]
+         (:bindings ex/ground-contact-kernel)))
+  (is (= 64 (:workgroup-size ex/ground-contact-kernel))))
