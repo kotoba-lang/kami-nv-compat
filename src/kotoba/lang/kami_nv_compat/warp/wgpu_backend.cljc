@@ -14,7 +14,15 @@
   directly.
 
   Types (BindingSpec, WgpuKernel) are portable data shapes shared by both
-  paths. Wave 20 of ADR-2607020130."
+  paths. Wave 20 of ADR-2607020130.
+
+  `rt-dispatch!` (wave 24) is a second, coarser dispatch entry for kami-rt's
+  bespoke ray/path-trace compute kernels: unlike `wgpu-execute` (a generic
+  JS-kernel-fn + WgpuKernel dispatch), callers hand it a WGSL source string
+  and an ordered list of named buffers ({:binding :kind :data} or {:binding
+  :kind :size} for the read_write output buffer) and get the read-back
+  framebuffer directly — the host does all buffer/pipeline/bindgroup/encoder
+  orchestration, kami-rt's core stays free of raw WebGPU calls."
   (:require [kotoba.lang.kami-nv-compat.warp.warp :as wp]))
 
 ;; ── Capability seam ──────────────────────────────────────────────────────
@@ -24,7 +32,8 @@
   by navigator.gpu."
   (has-gpu? [this])
   (acquire-device [this])
-  (wgpu-execute [this kernel dim inputs device]))
+  (wgpu-execute [this kernel dim inputs device])
+  (rt-dispatch! [this device wgsl buffers width height]))
 
 ;; ── JVM no-op backend ────────────────────────────────────────────────────
 
@@ -35,7 +44,9 @@
     (has-gpu? [_] false)
     (acquire-device [_] nil)
     (wgpu-execute [_ kernel dim inputs _device]
-      (wp/launch {:kernel-fn (:fn kernel) :dim dim :inputs inputs}))))
+      (wp/launch {:kernel-fn (:fn kernel) :dim dim :inputs inputs}))
+    (rt-dispatch! [_ _device _wgsl _buffers _width _height]
+      (throw (ex-info "rt-dispatch!: no WebGPU device on JVM" {})))))
 
 ;; ── Feature detection (host-delegated) ───────────────────────────────────
 
