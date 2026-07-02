@@ -1,8 +1,8 @@
 (ns kotoba.lang.kami-nv-compat.warp.examples-test
-  "Coverage for warp.examples waves 1-2 (damping-kernel, pendulum-step-kernel,
-  cartpole-step-kernel, two-link-arm-step-kernel). Each kernel is exercised
-  via warp.warp/launch, matching how a real caller would dispatch the
-  sync/CPU-fallback path."
+  "Coverage for warp.examples waves 1-3 (damping-kernel, pendulum-step-kernel,
+  cartpole-step-kernel, two-link-arm-step-kernel, franka-fk-inline,
+  franka-fk-kernel). Each kernel is exercised via warp.warp/launch, matching
+  how a real caller would dispatch the sync/CPU-fallback path."
   (:require [clojure.test :refer [deftest is testing]]
             [kotoba.lang.kami-nv-compat.warp.examples :as ex]
             [kotoba.lang.kami-nv-compat.warp.warp :as wp]))
@@ -133,3 +133,45 @@
   (is (every? false? (map :writeback (filter #(= (:kind %) :storage)
                                               (drop 4 (take 6 (:bindings ex/two-link-arm-step-kernel)))))))
   (is (= 64 (:workgroup-size ex/two-link-arm-step-kernel))))
+
+;; ── franka-fk-inline / franka-fk-kernel ────────────────────────────────────
+
+(defn- close3? [[ax ay az] [bx by bz] tol]
+  (and (close? ax bx tol) (close? ay by tol) (close? az bz tol)))
+
+(deftest franka-fk-inline-home-pose-matches-hand-derivation
+  (testing "q=[0 0 0 0 0 0 0]: with every R_q = identity, the chain reduces
+            to composing 7 fixed x-axis rotations by the URDF rpy angles —
+            hand-traced through all 7 steps to [0.088, 0, 1.033], which also
+            matches the commonly-cited Franka Panda home-pose EE height"
+    (is (close3? [0.088 0.0 1.033] (ex/franka-fk-inline (repeat 7 0.0)) 1e-9))))
+
+(deftest franka-fk-kernel-matches-franka-fk-inline
+  (testing "dispatched through warp.warp/launch + WpArray plumbing, the
+            kernel's :js path gives the identical result to calling
+            franka-fk-inline directly"
+    (let [q-in   (wp/wp-array (vec (repeat 7 0.0)))
+          ee-out (wp/wp-array (vec (repeat 3 0.0)))]
+      (wp/launch {:kernel-fn (:fn ex/franka-fk-kernel) :dim 1 :inputs [q-in ee-out]})
+      (is (close3? (ex/franka-fk-inline (repeat 7 0.0)) @ee-out 1e-12)))))
+
+(deftest franka-fk-kernel-batches-independent-envs
+  (testing "dim=N runs N independent envs (env*7 / env*3 offsets don't
+            collide across envs)"
+    (let [envs   [[0.0 0.0 0.0 0.0 0.0 0.0 0.0]
+                  [0.5 -0.3 0.2 -1.5 0.1 1.8 0.7]]
+          q-in   (wp/wp-array (vec (apply concat envs)))
+          ee-out (wp/wp-array (vec (repeat 6 0.0)))]
+      (wp/launch {:kernel-fn (:fn ex/franka-fk-kernel) :dim 2 :inputs [q-in ee-out]})
+      (is (close3? (ex/franka-fk-inline (first envs)) (subvec @ee-out 0 3) 1e-12))
+      (is (close3? (ex/franka-fk-inline (second envs)) (subvec @ee-out 3 6) 1e-12)))))
+
+(deftest franka-fk-inline-finite-for-arbitrary-pose
+  (is (every? #(#?(:clj Double/isFinite :cljs js/isFinite) %)
+              (ex/franka-fk-inline [0.5 -0.3 0.2 -1.5 0.1 1.8 0.7]))))
+
+(deftest franka-fk-kernel-registers-correct-bindings
+  (is (= [{:binding 0 :kind :storage :input-index 0 :writeback false}
+          {:binding 1 :kind :storage :input-index 1 :writeback true}]
+         (:bindings ex/franka-fk-kernel)))
+  (is (= 64 (:workgroup-size ex/franka-fk-kernel))))
