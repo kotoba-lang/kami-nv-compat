@@ -305,3 +305,125 @@
           {:binding 6 :kind :uniform :input-index 6 :writeback false}]
          (:bindings ex/observation-normalize-kernel)))
   (is (= 64 (:workgroup-size ex/observation-normalize-kernel))))
+
+;; ── anymal-fk-inline / anymal-fk-kernel ─────────────────────────────────────
+
+(deftest anymal-fk-inline-zero-q-matches-hand-derivation
+  (testing "q=zeros for all 4 legs: every rot-axis(axis, 0) is the identity
+            matrix, so each foot is simply the sum of that leg's
+            haa-base + hfe-local + kfe-local + foot-local offsets — hand
+            summed here independently of the R_world composition code path"
+    (let [feet (ex/anymal-fk-inline (vec (repeat 12 0.0)))]
+      (is (close3? [0.277 0.2205 -0.634] (feet 0) 1e-12))          ; LF
+      (is (close3? [-0.277 0.2205 -0.634] (feet 1) 1e-12))         ; LH
+      (is (close3? [0.277 -0.0115 -0.634] (feet 2) 1e-12))         ; RF
+      (is (close3? [-0.277 -0.0115 -0.634] (feet 3) 1e-12)))))     ; RH
+
+(deftest anymal-fk-kernel-matches-anymal-fk-inline
+  (testing "dispatched through warp.warp/launch + WpArray plumbing, the
+            kernel's :js path gives the identical result to calling
+            anymal-fk-inline directly"
+    (let [q-in     (wp/wp-array (vec (repeat 12 0.0)))
+          feet-out (wp/wp-array (vec (repeat 12 0.0)))]
+      (wp/launch {:kernel-fn (:fn ex/anymal-fk-kernel) :dim 1 :inputs [q-in feet-out]})
+      (is (= (vec (apply concat (ex/anymal-fk-inline (vec (repeat 12 0.0)))))
+             @feet-out)))))
+
+(deftest anymal-fk-kernel-batches-independent-envs
+  (testing "dim=N runs N independent envs (env*12 offsets don't collide
+            across envs)"
+    (let [env0     (vec (repeat 12 0.0))
+          env1     [0.1 -0.2 0.3 0.05 -0.1 0.15 -0.05 0.2 -0.15 0.1 0.1 0.1]
+          q-in     (wp/wp-array (vec (concat env0 env1)))
+          feet-out (wp/wp-array (vec (repeat 24 0.0)))]
+      (wp/launch {:kernel-fn (:fn ex/anymal-fk-kernel) :dim 2 :inputs [q-in feet-out]})
+      (is (= (vec (apply concat (ex/anymal-fk-inline env0))) (subvec @feet-out 0 12)))
+      (is (= (vec (apply concat (ex/anymal-fk-inline env1))) (subvec @feet-out 12 24))))))
+
+(deftest anymal-fk-inline-finite-for-arbitrary-pose
+  (is (every? #(#?(:clj Double/isFinite :cljs js/isFinite) %)
+              (apply concat (ex/anymal-fk-inline [0.1 -0.2 0.3 0.05 -0.1 0.15
+                                                   -0.05 0.2 -0.15 0.1 0.1 0.1])))))
+
+(deftest anymal-fk-kernel-registers-correct-bindings
+  (is (= [{:binding 0 :kind :storage :input-index 0 :writeback false}
+          {:binding 1 :kind :storage :input-index 1 :writeback true}]
+         (:bindings ex/anymal-fk-kernel)))
+  (is (= 64 (:workgroup-size ex/anymal-fk-kernel))))
+
+;; ── generic-serial-fk-inline / generic-serial-fk-kernel ─────────────────────
+;;
+;; Franka's own xyz/rpy/axis data (rpy = (r,0,0), axis = z for every joint)
+;; is a genuine independent cross-check: generic-serial-fk-inline's
+;; rot-rpy-full(r,0,0) reduces algebraically to wave 47's rot-rpy(r), and its
+;; rot-axis([0,0,1], angle) reduces to wave 47's rot-z(angle) — both already
+;; verified in franka-fk-*'s own tests — so feeding the generic kernel
+;; Franka's config must reproduce franka-fk-inline's output exactly.
+
+(def ^:private generic-fk-half-pi (/ Math/PI 2))
+
+(def ^:private generic-fk-franka-xyz
+  [[0 0 0.333] [0 0 0] [0 -0.316 0] [0.0825 0 0]
+   [-0.0825 0.384 0] [0 0 0] [0.088 0 0]])
+
+(def ^:private generic-fk-franka-rpy
+  [[0 0 0] [(- generic-fk-half-pi) 0 0] [generic-fk-half-pi 0 0]
+   [generic-fk-half-pi 0 0] [(- generic-fk-half-pi) 0 0]
+   [generic-fk-half-pi 0 0] [generic-fk-half-pi 0 0]])
+
+(def ^:private generic-fk-franka-axis (vec (repeat 7 [0 0 1])))
+
+(deftest generic-serial-fk-inline-matches-franka-fk-inline-for-franka-config
+  (testing "feeding generic-serial-fk-inline Franka's own joint xyz/rpy/axis
+            data reproduces franka-fk-inline's output exactly, at both the
+            home pose and an arbitrary pose"
+    (is (close3? (ex/franka-fk-inline (repeat 7 0.0))
+                 (ex/generic-serial-fk-inline (repeat 7 0.0) generic-fk-franka-xyz
+                                               generic-fk-franka-rpy generic-fk-franka-axis)
+                 1e-12))
+    (let [q [0.5 -0.3 0.2 -1.5 0.1 1.8 0.7]]
+      (is (close3? (ex/franka-fk-inline q)
+                   (ex/generic-serial-fk-inline q generic-fk-franka-xyz
+                                                 generic-fk-franka-rpy generic-fk-franka-axis)
+                   1e-12)))))
+
+(deftest generic-serial-fk-kernel-matches-generic-serial-fk-inline
+  (testing "dispatched through warp.warp/launch + WpArray plumbing (including
+            the plain-number n uniform), the kernel's :js path gives the
+            identical result to calling generic-serial-fk-inline directly"
+    (let [q          [0.5 -0.3 0.2 -1.5 0.1 1.8 0.7]
+          q-in       (wp/wp-array (vec q))
+          joint-xyz  (wp/wp-array (vec (apply concat generic-fk-franka-xyz)))
+          joint-rpy  (wp/wp-array (vec (apply concat generic-fk-franka-rpy)))
+          joint-axis (wp/wp-array (vec (apply concat generic-fk-franka-axis)))
+          ee-out     (wp/wp-array (vec (repeat 3 0.0)))]
+      (wp/launch {:kernel-fn (:fn ex/generic-serial-fk-kernel) :dim 1
+                  :inputs [q-in joint-xyz joint-rpy joint-axis ee-out 7]})
+      (is (close3? (ex/generic-serial-fk-inline q generic-fk-franka-xyz
+                                                 generic-fk-franka-rpy generic-fk-franka-axis)
+                   @ee-out 1e-12)))))
+
+(deftest generic-serial-fk-kernel-batches-independent-envs
+  (testing "dim=N runs N independent envs (env*n offsets don't collide
+            across envs)"
+    (let [envs       [[0.0 0.0 0.0 0.0 0.0 0.0 0.0]
+                       [0.5 -0.3 0.2 -1.5 0.1 1.8 0.7]]
+          q-in       (wp/wp-array (vec (apply concat envs)))
+          joint-xyz  (wp/wp-array (vec (apply concat generic-fk-franka-xyz)))
+          joint-rpy  (wp/wp-array (vec (apply concat generic-fk-franka-rpy)))
+          joint-axis (wp/wp-array (vec (apply concat generic-fk-franka-axis)))
+          ee-out     (wp/wp-array (vec (repeat 6 0.0)))]
+      (wp/launch {:kernel-fn (:fn ex/generic-serial-fk-kernel) :dim 2
+                  :inputs [q-in joint-xyz joint-rpy joint-axis ee-out 7]})
+      (is (close3? (ex/franka-fk-inline (first envs)) (subvec @ee-out 0 3) 1e-12))
+      (is (close3? (ex/franka-fk-inline (second envs)) (subvec @ee-out 3 6) 1e-12)))))
+
+(deftest generic-serial-fk-kernel-registers-correct-bindings
+  (is (= [{:binding 0 :kind :storage :input-index 0 :writeback false}
+          {:binding 1 :kind :storage :input-index 1 :writeback false}
+          {:binding 2 :kind :storage :input-index 2 :writeback false}
+          {:binding 3 :kind :storage :input-index 3 :writeback false}
+          {:binding 4 :kind :storage :input-index 4 :writeback true}
+          {:binding 5 :kind :uniform :input-index 5 :writeback false}]
+         (:bindings ex/generic-serial-fk-kernel)))
+  (is (= 64 (:workgroup-size ex/generic-serial-fk-kernel))))

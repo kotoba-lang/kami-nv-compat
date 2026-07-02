@@ -774,3 +774,305 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
                sigma (max (nth std j) 1e-8)
                v     (+ (/ (- (nth obs i) (nth mean j)) sigma) (nth noise i))]
            (wp/clamp v (nth clamp-low j) (nth clamp-high j))))))
+
+;; ── ANYmal C quadruped forward kinematics (env-parallel) ──────────────────
+;;
+;; Computes 4 foot positions (LF, LH, RF, RH order) for N envs in parallel
+;; from per-env q[12] (3 joints/leg: HAA hip ab/adduction, HFE hip
+;; flex/extension, KFE knee flex/extension). Real ANYbotics joint origins
+;; (iter 94).
+;;
+;; Reuses mat3-mul-small/matvec3-small (wave 47) plus a NEW private helper
+;; this wave introduces: rot-axis, Rodrigues' rotation matrix about an
+;; arbitrary unit axis -- generalises wave 47's rot-z (fixed z-axis only).
+;; Angle=0 gives the identity matrix for any axis; a 90-degree rotation
+;; about the z-axis takes [1 0 0] to [0 1 0] (right-hand rule, verified
+;; against the TS `_rotAxis` reference during porting).
+;;
+;; Storage layout: q-in length 12*N (3 joints x 4 legs per env), feet-out
+;; length 12*N (4 feet x xyz per env).
+;;
+;; Bindings: q-in (storage read, writeback false), feet-out (storage
+;; read_write).
+
+(defn- rot-axis
+  "Rodrigues' rotation matrix about an arbitrary unit axis [ax ay az] by
+  angle (radians). Port of TS's private `_rotAxis` (the JS-reference
+  formula; algebraically identical to the WGSL `rot_axis` function's
+  column-vector mat3x3 constructor, just written out row-major here)."
+  [axis angle]
+  (let [c  (wp/cos angle) s (wp/sin angle) oc (- 1 c)
+        ax (axis 0) ay (axis 1) az (axis 2)]
+    [[(+ c (* ax ax oc))        (- (* ax ay oc) (* az s))    (+ (* ax az oc) (* ay s))]
+     [(+ (* ay ax oc) (* az s)) (+ c (* ay ay oc))            (- (* ay az oc) (* ax s))]
+     [(- (* az ax oc) (* ay s)) (+ (* az ay oc) (* ax s))    (+ c (* az az oc))]]))
+
+(def ^:private anymal-joint-axes
+  "HAA, HFE, KFE joint axes (body frame), shared by all 4 legs."
+  [[1 0 0] [0 1 0] [0 1 0]])
+
+(def ^:private anymal-haa-base
+  "Per-leg HAA base attachment point, order LF LH RF RH (real ANYbotics
+  origins, iter 94)."
+  [[ 0.277  0.116 0.0]
+   [-0.277  0.116 0.0]
+   [ 0.277 -0.116 0.0]
+   [-0.277 -0.116 0.0]])
+
+(def ^:private anymal-hfe-local
+  "HFE origin in the HAA frame (canonical, same for all legs)."
+  [0 0.0635 0])
+
+(def ^:private anymal-kfe-local
+  "KFE origin in the HFE frame (canonical, same for all legs)."
+  [0 0.041 -0.317])
+
+(def ^:private anymal-foot-local
+  "Foot origin in the KFE frame (canonical, same for all legs)."
+  [0 0 -0.317])
+
+(defn anymal-fk-inline
+  "Reference ANYmal C foot positions in pure Clojure -- used by
+  anymal-fk-kernel's :js fallback AND callable directly for
+  cross-validation. q is a 12-element seq of joint angles (3 per leg, legs
+  in LF/LH/RF/RH order). Returns 4 foot positions [x y z], one per leg in
+  the same order."
+  [q]
+  (vec
+    (for [leg (range 4)]
+      (let [r0 [[1 0 0] [0 1 0] [0 0 1]]
+            p0 (anymal-haa-base leg)
+            ;; HAA joint
+            r1 (mat3-mul-small r0 (rot-axis (anymal-joint-axes 0) (nth q (+ (* leg 3) 0))))
+            ;; HFE origin (in HAA frame) + joint
+            p1 (vec (map + p0 (matvec3-small r1 anymal-hfe-local)))
+            r2 (mat3-mul-small r1 (rot-axis (anymal-joint-axes 1) (nth q (+ (* leg 3) 1))))
+            ;; KFE origin (in HFE frame) + joint
+            p2 (vec (map + p1 (matvec3-small r2 anymal-kfe-local)))
+            r3 (mat3-mul-small r2 (rot-axis (anymal-joint-axes 2) (nth q (+ (* leg 3) 2))))
+            ;; Foot origin (in KFE frame)
+            p3 (vec (map + p2 (matvec3-small r3 anymal-foot-local)))]
+        p3))))
+
+(def anymal-fk-kernel
+  (wgpu/wgpu-kernel
+    {:js (fn [q-in feet-out]
+           (let [env  (wp/tid)
+                 q    (vec (for [i (range 12)] (wp/wp-get q-in (+ (* env 12) i))))
+                 feet (anymal-fk-inline q)]
+             (doseq [leg (range 4) k (range 3)]
+               (wp/wp-set feet-out (+ (* env 12) (* leg 3) k) (get-in feet [leg k])))))
+     :wgsl "
+@group(0) @binding(0) var<storage, read_write> q_in:     array<f32>;
+@group(0) @binding(1) var<storage, read_write> feet_out: array<f32>;
+
+fn rot_axis(axis: vec3<f32>, angle: f32) -> mat3x3<f32> {
+  let c = cos(angle); let s = sin(angle);
+  let oc = 1.0 - c;
+  let ax = axis.x; let ay = axis.y; let az = axis.z;
+  return mat3x3<f32>(
+    vec3<f32>(c + ax*ax*oc,        ay*ax*oc + az*s,    az*ax*oc - ay*s),
+    vec3<f32>(ax*ay*oc - az*s,     c + ay*ay*oc,        az*ay*oc + ax*s),
+    vec3<f32>(ax*az*oc + ay*s,     ay*az*oc - ax*s,    c + az*az*oc),
+  );
+}
+
+@compute @workgroup_size(64)
+fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
+  let env = gid.x;
+  let n_envs = arrayLength(&feet_out) / 12u;
+  if (env >= n_envs) { return; }
+
+  let base_q = env * 12u;
+  let base_out = env * 12u;
+
+  // Real ANYbotics joint axes (HAA, HFE, KFE per leg).
+  let axes = array<vec3<f32>, 3>(
+    vec3<f32>(1.0, 0.0, 0.0),    // HAA
+    vec3<f32>(0.0, 1.0, 0.0),    // HFE
+    vec3<f32>(0.0, 1.0, 0.0),    // KFE
+  );
+
+  // Per-leg HAA base attachment (iter 94: real ANYbotics origins).
+  // Order: LF, LH, RF, RH
+  let haa_base = array<vec3<f32>, 4>(
+    vec3<f32>( 0.277,  0.116, 0.0),  // LF
+    vec3<f32>(-0.277,  0.116, 0.0),  // LH
+    vec3<f32>( 0.277, -0.116, 0.0),  // RF
+    vec3<f32>(-0.277, -0.116, 0.0),  // RH
+  );
+
+  // Canonical local joint origins (same for all legs).
+  let hfe_local = vec3<f32>(0.0, 0.0635, 0.0);     // HFE in HAA frame
+  let kfe_local = vec3<f32>(0.0, 0.041, -0.317);   // KFE in HFE frame
+  let foot_local = vec3<f32>(0.0, 0.0, -0.317);    // foot in KFE frame
+
+  // 4 legs, processed sequentially within this thread.
+  for (var leg = 0u; leg < 4u; leg = leg + 1u) {
+    // Start at per-leg HAA attachment point with identity frame.
+    var R_world = mat3x3<f32>(
+      vec3<f32>(1.0, 0.0, 0.0),
+      vec3<f32>(0.0, 1.0, 0.0),
+      vec3<f32>(0.0, 0.0, 1.0),
+    );
+    var p_world = haa_base[leg];
+    // HAA joint
+    R_world = R_world * rot_axis(axes[0], q_in[base_q + leg * 3u + 0u]);
+    // HFE origin + joint
+    p_world = p_world + R_world * hfe_local;
+    R_world = R_world * rot_axis(axes[1], q_in[base_q + leg * 3u + 1u]);
+    // KFE origin + joint
+    p_world = p_world + R_world * kfe_local;
+    R_world = R_world * rot_axis(axes[2], q_in[base_q + leg * 3u + 2u]);
+    // Foot origin
+    let foot = p_world + R_world * foot_local;
+    feet_out[base_out + leg * 3u + 0u] = foot.x;
+    feet_out[base_out + leg * 3u + 1u] = foot.y;
+    feet_out[base_out + leg * 3u + 2u] = foot.z;
+  }
+}
+"
+     :bindings [(assoc (wgpu/storage-binding 0 0) :writeback false)
+                (wgpu/storage-binding 1 1)]
+     :workgroup-size 64}))
+
+;; ── Generic serial-chain FK (env-parallel, arbitrary N <= 12) ─────────────
+;;
+;; Generalises the Franka-specific FK kernel (wave 47) to arbitrary
+;; serial-chain revolute arms. Joint origins, rpy, and axes are runtime
+;; storage inputs (per-joint), so a single kernel handles Franka (N=7),
+;; UR10 (N=6), KUKA iiwa (N=7), Kinova Gen3 (N=7), UR5/UR16, etc. Max N=12
+;; is a WGSL-loop-bound compile-time cap; the CLJC/JS fallback has no such
+;; cap -- it simply loops q's actual length.
+;;
+;; Per-env input: q[N]. Robot-config storage: xyz[N*3] + rpy[N*3] +
+;; axis[N*3]. Uniform: n (joint count). Per-env output: ee-pos[3].
+;;
+;; Algorithm: same R_origin . R_axis(q) frame composition as franka-fk, but
+;; the origin rotation uses the FULL 3-DOF rot-rpy-full (a genuinely
+;; different formula from wave 47's simplified rot-rpy, which assumes
+;; pitch=yaw=0 and is Franka-specific -- not reused/conflated here) and the
+;; joint axis is a runtime per-joint input, so rot-axis replaces rot-z.
+;;
+;; Bindings: q-in, joint-xyz, joint-rpy, joint-axis (storage read, writeback
+;; false), ee-out (storage read_write), n (uniform).
+
+(defn- rot-rpy-full
+  "Full 3-DOF roll-pitch-yaw rotation matrix. Unlike wave 47's rot-rpy
+  (Franka-specific: assumes pitch=yaw=0 for every joint origin, so only the
+  x-rotation term survives), this handles all three angles -- genuinely
+  different formula, not a drop-in replacement for rot-rpy and vice versa."
+  [rpy]
+  (let [r  (rpy 0) p (rpy 1) y (rpy 2)
+        cr (wp/cos r) sr (wp/sin r)
+        cp (wp/cos p) sp (wp/sin p)
+        cy (wp/cos y) sy (wp/sin y)]
+    [[(* cy cp) (- (* cy sp sr) (* sy cr)) (+ (* cy sp cr) (* sy sr))]
+     [(* sy cp) (+ (* sy sp sr) (* cy cr)) (- (* sy sp cr) (* cy sr))]
+     [(- sp)    (* cp sr)                  (* cp cr)]]))
+
+(defn generic-serial-fk-inline
+  "Reference generic serial-chain FK in pure Clojure. q is a seq of N joint
+  angles; joint-xyz/joint-rpy/joint-axis are seqs of N [x y z] triples
+  (per-joint origin translation, origin rpy, and joint axis, all in the
+  parent joint's body frame). Returns the world-frame EE position [x y z]."
+  [q joint-xyz joint-rpy joint-axis]
+  (let [n (count q)]
+    (loop [i 0 r-world [[1 0 0] [0 1 0] [0 0 1]] p-world [0.0 0.0 0.0]]
+      (if (>= i n)
+        p-world
+        (let [r-origin (rot-rpy-full (nth joint-rpy i))
+              r-q      (rot-axis (nth joint-axis i) (nth q i))
+              r-i-in-p (mat3-mul-small r-origin r-q)
+              rotated  (matvec3-small r-world (nth joint-xyz i))
+              p-world' (vec (map + p-world rotated))
+              r-world' (mat3-mul-small r-world r-i-in-p)]
+          (recur (inc i) r-world' p-world'))))))
+
+(def generic-serial-fk-kernel
+  (wgpu/wgpu-kernel
+    {:js (fn [q-in joint-xyz joint-rpy joint-axis ee-out n]
+           (let [env  (wp/tid)
+                 q    (vec (for [i (range n)] (wp/wp-get q-in (+ (* env n) i))))
+                 xyz  (vec (for [i (range n)] [(wp/wp-get joint-xyz (+ (* i 3) 0))
+                                                (wp/wp-get joint-xyz (+ (* i 3) 1))
+                                                (wp/wp-get joint-xyz (+ (* i 3) 2))]))
+                 rpy  (vec (for [i (range n)] [(wp/wp-get joint-rpy (+ (* i 3) 0))
+                                                (wp/wp-get joint-rpy (+ (* i 3) 1))
+                                                (wp/wp-get joint-rpy (+ (* i 3) 2))]))
+                 axis (vec (for [i (range n)] [(wp/wp-get joint-axis (+ (* i 3) 0))
+                                                (wp/wp-get joint-axis (+ (* i 3) 1))
+                                                (wp/wp-get joint-axis (+ (* i 3) 2))]))
+                 ee   (generic-serial-fk-inline q xyz rpy axis)]
+             (wp/wp-set ee-out (+ (* env 3) 0) (ee 0))
+             (wp/wp-set ee-out (+ (* env 3) 1) (ee 1))
+             (wp/wp-set ee-out (+ (* env 3) 2) (ee 2))))
+     :wgsl "
+@group(0) @binding(0) var<storage, read_write> q_in:       array<f32>;
+@group(0) @binding(1) var<storage, read_write> joint_xyz:  array<f32>;
+@group(0) @binding(2) var<storage, read_write> joint_rpy:  array<f32>;
+@group(0) @binding(3) var<storage, read_write> joint_axis: array<f32>;
+@group(0) @binding(4) var<storage, read_write> ee_out:     array<f32>;
+@group(0) @binding(5) var<uniform>             n_uniform:  vec4<u32>;
+
+fn rot_rpy(r: f32, p: f32, y: f32) -> mat3x3<f32> {
+  let cr = cos(r); let sr = sin(r);
+  let cp = cos(p); let sp = sin(p);
+  let cy = cos(y); let sy = sin(y);
+  return mat3x3<f32>(
+    vec3<f32>(cy*cp, sy*cp, -sp),
+    vec3<f32>(cy*sp*sr - sy*cr, sy*sp*sr + cy*cr, cp*sr),
+    vec3<f32>(cy*sp*cr + sy*sr, sy*sp*cr - cy*sr, cp*cr),
+  );
+}
+
+fn rot_axis(axis: vec3<f32>, angle: f32) -> mat3x3<f32> {
+  let c = cos(angle); let s = sin(angle);
+  let oc = 1.0 - c;
+  let ax = axis.x; let ay = axis.y; let az = axis.z;
+  return mat3x3<f32>(
+    vec3<f32>(c + ax*ax*oc,        ay*ax*oc + az*s,    az*ax*oc - ay*s),
+    vec3<f32>(ax*ay*oc - az*s,     c + ay*ay*oc,        az*ay*oc + ax*s),
+    vec3<f32>(ax*az*oc + ay*s,     ay*az*oc - ax*s,    c + az*az*oc),
+  );
+}
+
+@compute @workgroup_size(64)
+fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
+  let env = gid.x;
+  let n = n_uniform.x;
+  let n_envs = arrayLength(&ee_out) / 3u;
+  if (env >= n_envs) { return; }
+  let base = env * n;
+
+  var R_world = mat3x3<f32>(
+    vec3<f32>(1.0, 0.0, 0.0),
+    vec3<f32>(0.0, 1.0, 0.0),
+    vec3<f32>(0.0, 0.0, 1.0),
+  );
+  var p_world = vec3<f32>(0.0, 0.0, 0.0);
+
+  // Loop bounded at MAX_N=12; runtime n controls early exit.
+  for (var i = 0u; i < 12u; i = i + 1u) {
+    if (i >= n) { break; }
+    let xyz = vec3<f32>(joint_xyz[i*3u + 0u], joint_xyz[i*3u + 1u], joint_xyz[i*3u + 2u]);
+    let R_origin = rot_rpy(joint_rpy[i*3u + 0u], joint_rpy[i*3u + 1u], joint_rpy[i*3u + 2u]);
+    let axis = vec3<f32>(joint_axis[i*3u + 0u], joint_axis[i*3u + 1u], joint_axis[i*3u + 2u]);
+    let R_q = rot_axis(axis, q_in[base + i]);
+    let R_iInP = R_origin * R_q;
+    let rotated = R_world * xyz;
+    p_world = p_world + rotated;
+    R_world = R_world * R_iInP;
+  }
+  ee_out[env * 3u + 0u] = p_world.x;
+  ee_out[env * 3u + 1u] = p_world.y;
+  ee_out[env * 3u + 2u] = p_world.z;
+}
+"
+     :bindings [(assoc (wgpu/storage-binding 0 0) :writeback false)
+                (assoc (wgpu/storage-binding 1 1) :writeback false)
+                (assoc (wgpu/storage-binding 2 2) :writeback false)
+                (assoc (wgpu/storage-binding 3 3) :writeback false)
+                (wgpu/storage-binding 4 4)
+                (wgpu/uniform-binding 5 5)]
+     :workgroup-size 64}))
