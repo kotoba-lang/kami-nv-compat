@@ -175,3 +175,133 @@
           {:binding 1 :kind :storage :input-index 1 :writeback true}]
          (:bindings ex/franka-fk-kernel)))
   (is (= 64 (:workgroup-size ex/franka-fk-kernel))))
+
+;; ── pd-joint-controller-kernel / pd-joint-controller-inline ───────────────
+;;
+;; tau[i] = Kp[i % n] * (q*[i] - q[i]) - Kd[i % n] * qdot[i]
+
+(deftest pd-joint-controller-kernel-matches-hand-derived-torque
+  (testing "2 joints (n=2), 2 envs' worth of joint state packed flat: hand
+            derived tau0 = 10*(2-1) - 2*0.5 = 9.0, tau1 = 5*(3-3) - 1*(-0.5) = 0.5"
+    (let [q-actual  (wp/wp-array [1.0 3.0])
+          qd-actual (wp/wp-array [0.5 -0.5])
+          q-target  (wp/wp-array [2.0 3.0])
+          kp        (wp/wp-array [10.0 5.0])
+          kd        (wp/wp-array [2.0 1.0])
+          tau-out   (wp/wp-array [0.0 0.0])]
+      (wp/launch {:kernel-fn (:fn ex/pd-joint-controller-kernel) :dim 2
+                  :inputs [q-actual qd-actual q-target kp kd tau-out 2]})
+      (is (close? (first @tau-out) 9.0 1e-12))
+      (is (close? (second @tau-out) 0.5 1e-12)))))
+
+(deftest pd-joint-controller-kernel-matches-pd-joint-controller-inline
+  (let [q-actual  [1.0 3.0] qd-actual [0.5 -0.5] q-target [2.0 3.0]
+        kp [10.0 5.0] kd [2.0 1.0]
+        tau-out (wp/wp-array [0.0 0.0])]
+    (wp/launch {:kernel-fn (:fn ex/pd-joint-controller-kernel) :dim 2
+                :inputs [(wp/wp-array q-actual) (wp/wp-array qd-actual) (wp/wp-array q-target)
+                         (wp/wp-array kp) (wp/wp-array kd) tau-out 2]})
+    (is (= @tau-out (ex/pd-joint-controller-inline q-actual qd-actual q-target kp kd 2)))))
+
+(deftest pd-joint-controller-kernel-registers-correct-bindings
+  (is (= [{:binding 0 :kind :storage :input-index 0 :writeback false}
+          {:binding 1 :kind :storage :input-index 1 :writeback false}
+          {:binding 2 :kind :storage :input-index 2 :writeback false}
+          {:binding 3 :kind :storage :input-index 3 :writeback false}
+          {:binding 4 :kind :storage :input-index 4 :writeback false}
+          {:binding 5 :kind :storage :input-index 5 :writeback true}
+          {:binding 6 :kind :uniform :input-index 6 :writeback false}]
+         (:bindings ex/pd-joint-controller-kernel)))
+  (is (= 64 (:workgroup-size ex/pd-joint-controller-kernel))))
+
+;; ── action-scale-clamp-kernel / action-scale-clamp-inline ─────────────────
+
+(deftest action-scale-clamp-kernel-clamps-at-both-bounds-and-passes-through
+  (testing "raw = scale*action + offset; raw0=1.1 clamps to hi=1.0,
+            raw1=0.3 passes through unclamped, raw2=-1.7 clamps to lo=-1.0"
+    (let [action (wp/wp-array [0.5 0.1 -0.9])
+          scale  (wp/wp-array [2.0]) offset (wp/wp-array [0.1])
+          lo     (wp/wp-array [-1.0]) hi (wp/wp-array [1.0])
+          out    (wp/wp-array [0.0 0.0 0.0])]
+      (wp/launch {:kernel-fn (:fn ex/action-scale-clamp-kernel) :dim 3
+                  :inputs [action scale offset lo hi out 1]})
+      (is (close? (nth @out 0) 1.0 1e-12))
+      (is (close? (nth @out 1) 0.3 1e-9))
+      (is (close? (nth @out 2) -1.0 1e-12)))))
+
+(deftest action-scale-clamp-kernel-matches-action-scale-clamp-inline
+  (let [action [0.5 0.1 -0.9] scale [2.0] offset [0.1] lo [-1.0] hi [1.0]
+        out (wp/wp-array [0.0 0.0 0.0])]
+    (wp/launch {:kernel-fn (:fn ex/action-scale-clamp-kernel) :dim 3
+                :inputs [(wp/wp-array action) (wp/wp-array scale) (wp/wp-array offset)
+                         (wp/wp-array lo) (wp/wp-array hi) out 1]})
+    (is (= @out (ex/action-scale-clamp-inline action scale offset lo hi 1)))))
+
+(deftest action-scale-clamp-kernel-registers-correct-bindings
+  (is (= 7 (count (:bindings ex/action-scale-clamp-kernel))))
+  (is (every? false? (map :writeback (take 5 (:bindings ex/action-scale-clamp-kernel)))))
+  (is (true? (:writeback (nth (:bindings ex/action-scale-clamp-kernel) 5))))
+  (is (= 64 (:workgroup-size ex/action-scale-clamp-kernel))))
+
+;; ── effort-limit-kernel / effort-limit-inline ──────────────────────────────
+
+(deftest effort-limit-kernel-clamps-symmetrically-with-inclusive-boundary
+  (testing "tau=15 -> 10 (over), tau=-15 -> -10 (under), tau=5 -> 5 (inside),
+            tau=10 (exactly at limit) -> 10 (unchanged, inclusive boundary)"
+    (let [tau (wp/wp-array [15.0 -15.0 5.0 10.0])
+          lim (wp/wp-array [10.0])]
+      (wp/launch {:kernel-fn (:fn ex/effort-limit-kernel) :dim 4 :inputs [tau lim 1]})
+      (is (= [10.0 -10.0 5.0 10.0] @tau)))))
+
+(deftest effort-limit-kernel-matches-effort-limit-inline
+  (let [tau [15.0 -15.0 5.0 10.0] lim [10.0]
+        tau-arr (wp/wp-array tau)]
+    (wp/launch {:kernel-fn (:fn ex/effort-limit-kernel) :dim 4
+                :inputs [tau-arr (wp/wp-array lim) 1]})
+    (is (= @tau-arr (ex/effort-limit-inline tau lim 1)))))
+
+(deftest effort-limit-kernel-registers-correct-bindings
+  (is (= [{:binding 0 :kind :storage :input-index 0 :writeback true}
+          {:binding 1 :kind :storage :input-index 1 :writeback false}
+          {:binding 2 :kind :uniform :input-index 2 :writeback false}]
+         (:bindings ex/effort-limit-kernel)))
+  (is (= 64 (:workgroup-size ex/effort-limit-kernel))))
+
+;; ── observation-normalize-kernel / observation-normalize-inline ───────────
+
+(deftest observation-normalize-kernel-normalizes-clamps-and-floors-sigma
+  (testing "feature 0: (5-2)/1.5 + 0 = 2.0, within [-10,10] -> 2.0 unchanged;
+            feature 1: (100-0)/1.0 + 0 = 100, clamps to hi=1.0;
+            feature 2: std=0 floors to sigma=1e-8, (1-0)/1e-8 = 1e8, within
+            [-1e10,1e10] -> passes through unclamped"
+    (let [obs   (wp/wp-array [5.0 100.0 1.0])
+          mean  (wp/wp-array [2.0 0.0 0.0])
+          std   (wp/wp-array [1.5 1.0 0.0])
+          noise (wp/wp-array [0.0 0.0 0.0])
+          clo   (wp/wp-array [-10.0 -1.0 -1.0e10])
+          chi   (wp/wp-array [10.0 1.0 1.0e10])]
+      (wp/launch {:kernel-fn (:fn ex/observation-normalize-kernel) :dim 3
+                  :inputs [obs mean std noise clo chi 3]})
+      (is (close? (nth @obs 0) 2.0 1e-12))
+      (is (close? (nth @obs 1) 1.0 1e-12))
+      (is (close? (nth @obs 2) 1.0e8 1.0)))))
+
+(deftest observation-normalize-kernel-matches-observation-normalize-inline
+  (let [obs [5.0 100.0 1.0] mean [2.0 0.0 0.0] std [1.5 1.0 0.0]
+        noise [0.0 0.0 0.0] clo [-10.0 -1.0 -1.0e10] chi [10.0 1.0 1.0e10]
+        obs-arr (wp/wp-array obs)]
+    (wp/launch {:kernel-fn (:fn ex/observation-normalize-kernel) :dim 3
+                :inputs [obs-arr (wp/wp-array mean) (wp/wp-array std) (wp/wp-array noise)
+                         (wp/wp-array clo) (wp/wp-array chi) 3]})
+    (is (= @obs-arr (ex/observation-normalize-inline obs mean std noise clo chi 3)))))
+
+(deftest observation-normalize-kernel-registers-correct-bindings
+  (is (= [{:binding 0 :kind :storage :input-index 0 :writeback true}
+          {:binding 1 :kind :storage :input-index 1 :writeback false}
+          {:binding 2 :kind :storage :input-index 2 :writeback false}
+          {:binding 3 :kind :storage :input-index 3 :writeback false}
+          {:binding 4 :kind :storage :input-index 4 :writeback false}
+          {:binding 5 :kind :storage :input-index 5 :writeback false}
+          {:binding 6 :kind :uniform :input-index 6 :writeback false}]
+         (:bindings ex/observation-normalize-kernel)))
+  (is (= 64 (:workgroup-size ex/observation-normalize-kernel))))
