@@ -1354,3 +1354,279 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
                            (if (or (pos? limit-violated) (pos? fell)) 1 0))))
      :truncated (vec (for [env (range n-envs)]
                         (if (>= (nth step env) max-steps) 1 0)))}))
+
+;; ── MLP policy-net forward (env-parallel) ─────────────────────────────────
+;;
+;; Isaac Lab's PPO/SAC default policy: 2-layer MLP `Linear -> ReLU ->
+;; Linear -> tanh`. Per-env forward pass:
+;;
+;;   hidden = ReLU(W1 * obs + b1)      shape [hidden_dim]
+;;   action = tanh(W2 * hidden + b2)   shape [action_dim]
+;;
+;; Weights are shared across envs (storage, writeback false); per-env obs
+;; input + action output (writeback true). WGSL hard-codes MAX_HIDDEN=128 /
+;; MAX_OBS=64 as fixed-size loop bounds/array (fits comfortably in 32
+;; KB/workgroup -> iPhone-12 WebGPU safe per ADR-2605241900 edge-target
+;; invariant); the :js fallback has no such fixed bound and loops to the
+;; actual runtime hidden-dim/obs-dim.
+;;
+;; Closes the trained-policy inference gap: a checkpoint exported as
+;; (W1, b1, W2, b2) flat float32 arrays can now run in-browser alongside
+;; the full simulation loop.
+;;
+;; Bindings (7 total): obs, W1, b1, W2, b2 (storage read, writeback false),
+;; action-out (storage read_write), dims (uniform vec4<u32>: .x=obs_dim
+;; .y=hidden_dim .z=action_dim -- packed from the trailing 3 scalar :js
+;; args the same way two-link-arm-step-kernel packs link1/link2).
+
+(def mlp-policy-forward-kernel
+  (wgpu/wgpu-kernel
+    {:js (fn [obs W1 b1 W2 b2 action-out obs-dim hidden-dim action-dim]
+           (let [env    (wp/tid)
+                 hidden (vec (for [h (range hidden-dim)]
+                                (let [s (reduce (fn [acc o]
+                                                   (+ acc (* (wp/wp-get W1 (+ (* h obs-dim) o))
+                                                             (wp/wp-get obs (+ (* env obs-dim) o)))))
+                                                 (wp/wp-get b1 h)
+                                                 (range obs-dim))]
+                                  (if (> s 0) s 0))))]
+             (doseq [a (range action-dim)]
+               (let [s (reduce (fn [acc h]
+                                  (+ acc (* (wp/wp-get W2 (+ (* a hidden-dim) h))
+                                            (nth hidden h))))
+                                (wp/wp-get b2 a)
+                                (range hidden-dim))]
+                 (wp/wp-set action-out (+ (* env action-dim) a) (Math/tanh s))))))
+     :wgsl "
+@group(0) @binding(0) var<storage, read_write> obs:        array<f32>;
+@group(0) @binding(1) var<storage, read_write> W1:         array<f32>;
+@group(0) @binding(2) var<storage, read_write> b1:         array<f32>;
+@group(0) @binding(3) var<storage, read_write> W2:         array<f32>;
+@group(0) @binding(4) var<storage, read_write> b2:         array<f32>;
+@group(0) @binding(5) var<storage, read_write> action_out: array<f32>;
+@group(0) @binding(6) var<uniform>             dims:       vec4<u32>;
+//                                                          .x = obs_dim
+//                                                          .y = hidden_dim
+//                                                          .z = action_dim
+
+@compute @workgroup_size(64)
+fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
+  let env = gid.x;
+  let obs_dim = dims.x;
+  let hidden_dim = dims.y;
+  let action_dim = dims.z;
+  let n_envs = arrayLength(&action_out) / action_dim;
+  if (env >= n_envs) { return; }
+
+  var hidden: array<f32, 128>;
+  for (var h = 0u; h < 128u; h = h + 1u) {
+    if (h >= hidden_dim) { break; }
+    var s: f32 = b1[h];
+    for (var o = 0u; o < 64u; o = o + 1u) {
+      if (o >= obs_dim) { break; }
+      s = s + W1[h * obs_dim + o] * obs[env * obs_dim + o];
+    }
+    hidden[h] = max(0.0, s);
+  }
+  for (var a = 0u; a < action_dim; a = a + 1u) {
+    var s: f32 = b2[a];
+    for (var h = 0u; h < 128u; h = h + 1u) {
+      if (h >= hidden_dim) { break; }
+      s = s + W2[a * hidden_dim + h] * hidden[h];
+    }
+    action_out[env * action_dim + a] = tanh(s);
+  }
+}
+"
+     :bindings [(assoc (wgpu/storage-binding 0 0) :writeback false)
+                (assoc (wgpu/storage-binding 1 1) :writeback false)
+                (assoc (wgpu/storage-binding 2 2) :writeback false)
+                (assoc (wgpu/storage-binding 3 3) :writeback false)
+                (assoc (wgpu/storage-binding 4 4) :writeback false)
+                (wgpu/storage-binding 5 5)
+                (wgpu/uniform-binding 6 6)]
+     :workgroup-size 64}))
+
+(defn mlp-policy-forward-inline
+  "Reference 2-layer MLP forward (Linear -> ReLU -> Linear -> tanh) in pure
+  Clojure. obs is a flat envs*obs-dim seq (row-major); W1 is hidden-dim *
+  obs-dim (row-major, W1[h*obs-dim+o]), b1 is hidden-dim; W2 is action-dim *
+  hidden-dim (row-major, W2[a*hidden-dim+h]), b2 is action-dim. Returns a
+  flat envs*action-dim vector (row-major).
+
+  A separate, deliberately-standalone implementation from
+  kotoba.lang.kami-nv-compat.policies/run-mlp-policy (JVM-only; wraps the
+  same algorithm behind a JSON policy-checkpoint spec loader) -- this fn
+  instead mirrors mlp-policy-forward-kernel's own :js fallback, matching
+  every other kernel/inline pair in this file's self-contained,
+  standalone-WGSL-compilable design."
+  [obs W1 b1 W2 b2 obs-dim hidden-dim action-dim]
+  (let [n-envs (quot (count obs) obs-dim)]
+    (vec
+      (for [env (range n-envs)
+            :let [hidden (vec (for [h (range hidden-dim)]
+                                 (let [s (reduce (fn [acc o]
+                                                    (+ acc (* (nth W1 (+ (* h obs-dim) o))
+                                                              (nth obs (+ (* env obs-dim) o)))))
+                                                  (nth b1 h)
+                                                  (range obs-dim))]
+                                   (if (> s 0) s 0))))]
+            a (range action-dim)]
+        (let [s (reduce (fn [acc h]
+                           (+ acc (* (nth W2 (+ (* a hidden-dim) h))
+                                     (nth hidden h))))
+                         (nth b2 a)
+                         (range hidden-dim))]
+          (Math/tanh s))))))
+
+;; ── Conditional per-env reset (env x dim parallel) ────────────────────────
+;;
+;; Closes the loop between TerminationManager (iter 105) and next-episode
+;; initial state. Per-(env, dim) thread: if done[env] == 1, copy
+;; reset-state[env*d + i] -> state[env*d + i]; else leave state untouched.
+;;
+;; One kernel handles any per-env array: joint state (d=N), velocity
+;; buffer (d=N), step counter (d=1), arbitrary observation history etc.
+;; Host invokes once per buffer with the appropriate d.
+;;
+;; Bindings (4 total): state (storage read_write), reset-state, done
+;; (storage read, writeback false), d (uniform).
+
+(def conditional-reset-kernel
+  (wgpu/wgpu-kernel
+    {:js (fn [state reset-state done d]
+           (let [idx (wp/tid)
+                 env (long (wp/floor (double (/ idx d))))]
+             (when (>= (wp/wp-get done env) 0.5)
+               (wp/wp-set state idx (wp/wp-get reset-state idx)))))
+     :wgsl "
+@group(0) @binding(0) var<storage, read_write> state:       array<f32>;
+@group(0) @binding(1) var<storage, read_write> reset_state: array<f32>;
+@group(0) @binding(2) var<storage, read_write> done:        array<f32>;
+@group(0) @binding(3) var<uniform>             d_uniform:   vec4<u32>;
+
+@compute @workgroup_size(64)
+fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
+  let idx = gid.x;
+  let total = arrayLength(&state);
+  if (idx >= total) { return; }
+  let d = d_uniform.x;
+  let env = idx / d;
+  if (done[env] >= 0.5) {
+    state[idx] = reset_state[idx];
+  }
+}
+"
+     :bindings [(wgpu/storage-binding 0 0)
+                (assoc (wgpu/storage-binding 1 1) :writeback false)
+                (assoc (wgpu/storage-binding 2 2) :writeback false)
+                (wgpu/uniform-binding 3 3)]
+     :workgroup-size 64}))
+
+(defn conditional-reset-inline
+  "Reference conditional per-env reset in pure Clojure: returns the new
+  state vector (env-wise copy of reset-state into any index whose env has
+  done[env] >= 0.5; every other index keeps its original state value). TS
+  mutates `state` in place -- ported as a pure return value instead, since
+  Clojure vectors are immutable (same return-instead-of-mutate treatment
+  applied to every void/mutating 'Inline' fn in this file)."
+  [state reset-state done d]
+  (vec (map-indexed
+         (fn [idx v]
+           (let [env (long (wp/floor (double (/ idx d))))]
+             (if (>= (nth done env) 0.5) (nth reset-state idx) v)))
+         state)))
+
+;; ── Ground-plane contact (env x foot parallel, frictionless) ─────────────
+;;
+;; Spring-damper normal-force model -- the minimal physical contact pattern
+;; that lets legged demos (ANYmal walking, biped standing) push against a
+;; ground plane. Per-foot:
+;;
+;;   penetration = ground_z - p_z
+;;   if penetration > 0: F_z = max(0, Kp*penetration - Kd*v_z)
+;;   else:               F_z = 0
+;;   F_x = F_y = 0  (frictionless; iter 110 will add Coulomb tangent)
+;;
+;; One thread per (env, foot) pair. ground_z, Kp, Kd shared across all envs
+;; as scalars; mu (friction coefficient) is unused in this revision --
+;; reserved for a future Coulomb-tangent variant.
+;;
+;; Bridges from the foot-FK pipeline (iter 70, 88, 95 ANYmal) to a
+;; physically-driven simulation step -- Fz can be summed into a base
+;; reaction force or projected through J^T to per-joint contact torques.
+;;
+;; Bindings (4 total): p-world, v-world (storage read, writeback false),
+;; f-out (storage read_write), params (uniform vec4<f32>: .x=ground_z
+;; .y=Kp .z=Kd -- packed from the trailing 3 scalar :js args).
+
+(def ground-contact-kernel
+  (wgpu/wgpu-kernel
+    {:js (fn [p-world v-world f-out ground-z kp kd]
+           (let [idx         (wp/tid)
+                 base        (* idx 3)
+                 pz          (wp/wp-get p-world (+ base 2))
+                 penetration (- ground-z pz)
+                 fz          (if (> penetration 0)
+                               (let [vz  (wp/wp-get v-world (+ base 2))
+                                     raw (- (* kp penetration) (* kd vz))]
+                                 (if (> raw 0) raw 0))
+                               0)]
+             (wp/wp-set f-out (+ base 0) 0)
+             (wp/wp-set f-out (+ base 1) 0)
+             (wp/wp-set f-out (+ base 2) fz)))
+     :wgsl "
+@group(0) @binding(0) var<storage, read_write> p_world: array<f32>;
+@group(0) @binding(1) var<storage, read_write> v_world: array<f32>;
+@group(0) @binding(2) var<storage, read_write> f_out:   array<f32>;
+@group(0) @binding(3) var<uniform>             params:  vec4<f32>;
+//                                                       .x = ground_z
+//                                                       .y = Kp
+//                                                       .z = Kd
+
+@compute @workgroup_size(64)
+fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
+  let idx = gid.x;
+  let total = arrayLength(&f_out) / 3u;
+  if (idx >= total) { return; }
+  let base = idx * 3u;
+  let pz = p_world[base + 2u];
+  let penetration = params.x - pz;
+  var fz: f32 = 0.0;
+  if (penetration > 0.0) {
+    let vz = v_world[base + 2u];
+    fz = max(0.0, params.y * penetration - params.z * vz);
+  }
+  f_out[base + 0u] = 0.0;
+  f_out[base + 1u] = 0.0;
+  f_out[base + 2u] = fz;
+}
+"
+     :bindings [(assoc (wgpu/storage-binding 0 0) :writeback false)
+                (assoc (wgpu/storage-binding 1 1) :writeback false)
+                (wgpu/storage-binding 2 2)
+                (wgpu/uniform-binding 3 3)]
+     :workgroup-size 64}))
+
+(defn ground-contact-inline
+  "Reference frictionless ground-plane contact per foot, pure Clojure.
+  p-world/v-world are flat 3*n (x,y,z per foot); n is derived from their
+  own length instead of from a caller-supplied output-array length (TS's
+  fOut param exists only so its .length can be read as n -- Clojure
+  returns the new f-out vector instead of mutating an output array in
+  place, so that awkward read-only-for-length param is dropped). Returns a
+  flat 3*n [fx fy fz ...] vector."
+  [p-world v-world ground-z kp kd]
+  (let [total (quot (count p-world) 3)]
+    (vec (mapcat
+           (fn [i]
+             (let [base        (* i 3)
+                   pz          (nth p-world (+ base 2))
+                   penetration (- ground-z pz)
+                   fz          (if (> penetration 0)
+                                 (let [vz  (nth v-world (+ base 2))
+                                       raw (- (* kp penetration) (* kd vz))]
+                                   (if (> raw 0) raw 0))
+                                 0)]
+               [0 0 fz]))
+           (range total)))))
