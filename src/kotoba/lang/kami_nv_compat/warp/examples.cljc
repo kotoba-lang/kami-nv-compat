@@ -528,3 +528,249 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
      :bindings [(assoc (wgpu/storage-binding 0 0) :writeback false)
                 (wgpu/storage-binding 1 1)]
      :workgroup-size 64}))
+
+;; ── PD joint controller (env×joint parallel) ──────────────────────────────
+;;
+;; tau[i] = Kp[i % n] * (q*[i] - q[i]) - Kd[i % n] * qdot[i]
+;;
+;; Per-(env,joint) state: q_actual, qd_actual (measured); q_target (desired).
+;; Per-joint gains kp, kd shared across envs (n = joints/env; idx % n picks
+;; the joint). Canonical Isaac Lab / Isaac Gym PD actuator model — sits
+;; between the action pipeline (action-scale-clamp-kernel below) and effort
+;; saturation (effort-limit-kernel below).
+;;
+;; Bindings (7 total): q_actual, qd_actual, q_target, kp, kd (storage read,
+;; writeback false), tau_out (storage read_write), n (uniform).
+
+(def pd-joint-controller-kernel
+  (wgpu/wgpu-kernel
+    {:js (fn [q-actual qd-actual q-target kp kd tau-out n]
+           (let [idx   (wp/tid)
+                 j     (mod idx n)
+                 q-err (- (wp/wp-get q-target idx) (wp/wp-get q-actual idx))
+                 tau   (- (* (wp/wp-get kp j) q-err) (* (wp/wp-get kd j) (wp/wp-get qd-actual idx)))]
+             (wp/wp-set tau-out idx tau)))
+     :wgsl "
+@group(0) @binding(0) var<storage, read_write> q_actual:  array<f32>;
+@group(0) @binding(1) var<storage, read_write> qd_actual: array<f32>;
+@group(0) @binding(2) var<storage, read_write> q_target:  array<f32>;
+@group(0) @binding(3) var<storage, read_write> kp:        array<f32>;
+@group(0) @binding(4) var<storage, read_write> kd:        array<f32>;
+@group(0) @binding(5) var<storage, read_write> tau_out:   array<f32>;
+@group(0) @binding(6) var<uniform>             n_uniform: vec4<u32>;
+
+@compute @workgroup_size(64)
+fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
+  let idx = gid.x;
+  let total = arrayLength(&tau_out);
+  if (idx >= total) { return; }
+  let n = n_uniform.x;
+  let j = idx % n;
+  let q_err = q_target[idx] - q_actual[idx];
+  tau_out[idx] = kp[j] * q_err - kd[j] * qd_actual[idx];
+}
+"
+     :bindings [(assoc (wgpu/storage-binding 0 0) :writeback false)
+                (assoc (wgpu/storage-binding 1 1) :writeback false)
+                (assoc (wgpu/storage-binding 2 2) :writeback false)
+                (assoc (wgpu/storage-binding 3 3) :writeback false)
+                (assoc (wgpu/storage-binding 4 4) :writeback false)
+                (wgpu/storage-binding 5 5)
+                (wgpu/uniform-binding 6 6)]
+     :workgroup-size 64}))
+
+(defn pd-joint-controller-inline
+  "Reference PD joint controller in pure Clojure.
+  tau[i] = Kp[i % n] * (q*[i] - q[i]) - Kd[i % n] * qdot[i]"
+  [q-actual qd-actual q-target kp kd n]
+  (vec (for [i (range (count q-actual))]
+         (let [j (mod i n)]
+           (- (* (nth kp j) (- (nth q-target i) (nth q-actual i)))
+              (* (nth kd j) (nth qd-actual i)))))))
+
+;; ── Action scale + clamp (env×joint parallel) ────────────────────────────
+;;
+;; Isaac Lab's ActionManager canonical pipeline:
+;;
+;;     q_target[i] = clamp(
+;;         action_scale[j] * action[i] + action_offset[j],
+;;         q_lower[j], q_upper[j])
+;;
+;; Sits between the policy net (action in [-1, 1]^N typically tanh-squashed)
+;; and the PD controller (pd-joint-controller-kernel above). Per-joint
+;; scale/offset/limits are shared across envs (storage), so 1024-env x
+;; 12-joint dispatch needs only 48 floats of joint config.
+;;
+;; Bindings (7 total): action, action_scale, action_offset, q_lower, q_upper
+;; (storage read, writeback false), q_target_out (storage read_write), n
+;; (uniform).
+
+(def action-scale-clamp-kernel
+  (wgpu/wgpu-kernel
+    {:js (fn [action action-scale action-offset q-lower q-upper q-target-out n]
+           (let [idx (wp/tid)
+                 j   (mod idx n)
+                 raw (+ (* (wp/wp-get action-scale j) (wp/wp-get action idx))
+                        (wp/wp-get action-offset j))
+                 lo  (wp/wp-get q-lower j)
+                 hi  (wp/wp-get q-upper j)]
+             (wp/wp-set q-target-out idx (wp/clamp raw lo hi))))
+     :wgsl "
+@group(0) @binding(0) var<storage, read_write> action:       array<f32>;
+@group(0) @binding(1) var<storage, read_write> action_scale: array<f32>;
+@group(0) @binding(2) var<storage, read_write> action_offset:array<f32>;
+@group(0) @binding(3) var<storage, read_write> q_lower:      array<f32>;
+@group(0) @binding(4) var<storage, read_write> q_upper:      array<f32>;
+@group(0) @binding(5) var<storage, read_write> q_target_out: array<f32>;
+@group(0) @binding(6) var<uniform>             n_uniform:    vec4<u32>;
+
+@compute @workgroup_size(64)
+fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
+  let idx = gid.x;
+  let total = arrayLength(&q_target_out);
+  if (idx >= total) { return; }
+  let n = n_uniform.x;
+  let j = idx % n;
+  let raw = action_scale[j] * action[idx] + action_offset[j];
+  q_target_out[idx] = clamp(raw, q_lower[j], q_upper[j]);
+}
+"
+     :bindings [(assoc (wgpu/storage-binding 0 0) :writeback false)
+                (assoc (wgpu/storage-binding 1 1) :writeback false)
+                (assoc (wgpu/storage-binding 2 2) :writeback false)
+                (assoc (wgpu/storage-binding 3 3) :writeback false)
+                (assoc (wgpu/storage-binding 4 4) :writeback false)
+                (wgpu/storage-binding 5 5)
+                (wgpu/uniform-binding 6 6)]
+     :workgroup-size 64}))
+
+(defn action-scale-clamp-inline
+  "Reference action scale + clamp in pure Clojure."
+  [action action-scale action-offset q-lower q-upper n]
+  (vec (for [i (range (count action))]
+         (let [j   (mod i n)
+               raw (+ (* (nth action-scale j) (nth action i)) (nth action-offset j))]
+           (wp/clamp raw (nth q-lower j) (nth q-upper j))))))
+
+;; ── Effort saturation (env×joint parallel, in-place) ─────────────────────
+;;
+;; Canonical safety layer between the PD controller (pd-joint-controller-
+;; kernel above) and articulated-body forward dynamics. Caps each joint's
+;; torque at its actuator effort limit, matching Isaac Lab's per-joint
+;; effort_limit_sim clamp.
+;;
+;;     tau_i = clamp(tau_i, -effort_limit_j, +effort_limit_j)
+;;
+;; In-place storage write; per-joint effort_limit shared across envs.
+;;
+;; Bindings (3 total): tau (storage read_write), effort_limit (storage
+;; read, writeback false), n (uniform).
+
+(def effort-limit-kernel
+  (wgpu/wgpu-kernel
+    {:js (fn [tau effort-limit n]
+           (let [idx (wp/tid)
+                 j   (mod idx n)
+                 lim (wp/wp-get effort-limit j)
+                 t   (wp/wp-get tau idx)]
+             (wp/wp-set tau idx (wp/clamp t (- lim) lim))))
+     :wgsl "
+@group(0) @binding(0) var<storage, read_write> tau:          array<f32>;
+@group(0) @binding(1) var<storage, read_write> effort_limit: array<f32>;
+@group(0) @binding(2) var<uniform>             n_uniform:    vec4<u32>;
+
+@compute @workgroup_size(64)
+fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
+  let idx = gid.x;
+  let total = arrayLength(&tau);
+  if (idx >= total) { return; }
+  let n = n_uniform.x;
+  let j = idx % n;
+  let lim = effort_limit[j];
+  tau[idx] = clamp(tau[idx], -lim, lim);
+}
+"
+     :bindings [(wgpu/storage-binding 0 0)
+                (assoc (wgpu/storage-binding 1 1) :writeback false)
+                (wgpu/uniform-binding 2 2)]
+     :workgroup-size 64}))
+
+(defn effort-limit-inline
+  "Reference effort saturation in pure Clojure. TS mutates `tau` in place and
+  returns void; Clojure vectors are immutable, so this returns the clamped
+  vector instead (same functional result, idiomatic port)."
+  [tau effort-limit n]
+  (vec (for [i (range (count tau))]
+         (let [j   (mod i n)
+               lim (nth effort-limit j)]
+           (wp/clamp (nth tau i) (- lim) lim)))))
+
+;; ── Observation normalize + noise + clamp (env×feature parallel) ─────────
+;;
+;; Isaac Lab's ObservationManager canonical pipeline:
+;;
+;;     obs[i] = clamp(
+;;         (raw[i] - mean[j]) / std[j] + noise[i],
+;;         clamp_low[j], clamp_high[j])
+;;
+;; Host pre-generates noise[i] (Gaussian or any; WGSL has no portable RNG),
+;; so the kernel itself is deterministic — the test path can pass zeros to
+;; verify the normalize+clamp path independently.
+;;
+;; Per-feature mean/std/clamp shared across envs (storage); per-(env,
+;; feature) noise. Mirror of action-scale-clamp-kernel but on the obs side.
+;;
+;; Bindings (7 total): obs (storage read_write), mean, std, noise,
+;; clamp_low, clamp_high (storage read, writeback false), n (uniform).
+
+(def observation-normalize-kernel
+  (wgpu/wgpu-kernel
+    {:js (fn [obs mean std noise clamp-low clamp-high n]
+           (let [idx        (wp/tid)
+                 j          (mod idx n)
+                 sigma      (max (wp/wp-get std j) 1e-8)
+                 normalized (+ (/ (- (wp/wp-get obs idx) (wp/wp-get mean j)) sigma)
+                                (wp/wp-get noise idx))
+                 lo         (wp/wp-get clamp-low j)
+                 hi         (wp/wp-get clamp-high j)]
+             (wp/wp-set obs idx (wp/clamp normalized lo hi))))
+     :wgsl "
+@group(0) @binding(0) var<storage, read_write> obs:        array<f32>;
+@group(0) @binding(1) var<storage, read_write> mean:       array<f32>;
+@group(0) @binding(2) var<storage, read_write> std:        array<f32>;
+@group(0) @binding(3) var<storage, read_write> noise:      array<f32>;
+@group(0) @binding(4) var<storage, read_write> clamp_low:  array<f32>;
+@group(0) @binding(5) var<storage, read_write> clamp_high: array<f32>;
+@group(0) @binding(6) var<uniform>             n_uniform:  vec4<u32>;
+
+@compute @workgroup_size(64)
+fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
+  let idx = gid.x;
+  let total = arrayLength(&obs);
+  if (idx >= total) { return; }
+  let n = n_uniform.x;
+  let j = idx % n;
+  let sigma = max(std[j], 1e-8);
+  let normalized = (obs[idx] - mean[j]) / sigma + noise[idx];
+  obs[idx] = clamp(normalized, clamp_low[j], clamp_high[j]);
+}
+"
+     :bindings [(wgpu/storage-binding 0 0)
+                (assoc (wgpu/storage-binding 1 1) :writeback false)
+                (assoc (wgpu/storage-binding 2 2) :writeback false)
+                (assoc (wgpu/storage-binding 3 3) :writeback false)
+                (assoc (wgpu/storage-binding 4 4) :writeback false)
+                (assoc (wgpu/storage-binding 5 5) :writeback false)
+                (wgpu/uniform-binding 6 6)]
+     :workgroup-size 64}))
+
+(defn observation-normalize-inline
+  "Reference observation normalize + noise + clamp in pure Clojure. TS
+  mutates `obs` in place and returns void; returns the new vector instead
+  (same functional result, idiomatic port)."
+  [obs mean std noise clamp-low clamp-high n]
+  (vec (for [i (range (count obs))]
+         (let [j     (mod i n)
+               sigma (max (nth std j) 1e-8)
+               v     (+ (/ (- (nth obs i) (nth mean j)) sigma) (nth noise i))]
+           (wp/clamp v (nth clamp-low j) (nth clamp-high j))))))
