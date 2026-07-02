@@ -1630,3 +1630,551 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
                                  0)]
                [0 0 fz]))
            (range total)))))
+
+;; ── Franka 7-DoF FK + linear Jacobian (env-parallel) ──────────────────────
+;;
+;; Extends franka-fk-kernel with the 3x7 linear Jacobian. Each thread runs
+;; FK, stores all 7 joint poses (R, p) in memory, then derives per-joint
+;; Jacobian columns via axis_world_i x (p_ee - p_i) -- the standard
+;; revolute-joint linear-velocity Jacobian identity, where axis_world_i is
+;; the joint's world-frame z-axis (the third column of R_world_i).
+;;
+;; Per-env input: q[7]. Per-env output: ee_pos[3] + J[3][7] = 24 floats,
+;; struct-of-arrays layout [ee_x, ee_y, ee_z, J[0][0..6], J[1][0..6], J[2][0..6]].
+;;
+;; Bindings: q-in (storage read, N*7 floats, writeback false), out-buf
+;; (storage read_write, N*24 floats).
+
+(defn franka-fk-jacobian-inline
+  "Reference Franka 7-DoF FK + 3x7 linear Jacobian in pure Clojure -- used by
+  franka-fk-jacobian-kernel's :js fallback AND callable directly. Returns
+  {:ee [x y z] :J [[..7] [..7] [..7]]} where ee is the world-frame EE
+  position and J's rows are d(ee)/dq stacked per joint (row = xyz axis,
+  col = joint index)."
+  [q]
+  (loop [i 0 r-world [[1 0 0] [0 1 0] [0 0 1]] p-world [0.0 0.0 0.0]
+         poses-r [] poses-p []]
+    (if (>= i 7)
+      (let [ee   (poses-p 6)
+            cols (for [k (range 7)]
+                   (let [rk (poses-r k)
+                         a  [(get-in rk [0 2]) (get-in rk [1 2]) (get-in rk [2 2])]
+                         pk (poses-p k)
+                         dp [(- (ee 0) (pk 0)) (- (ee 1) (pk 1)) (- (ee 2) (pk 2))]]
+                     [(- (* (a 1) (dp 2)) (* (a 2) (dp 1)))
+                      (- (* (a 2) (dp 0)) (* (a 0) (dp 2)))
+                      (- (* (a 0) (dp 1)) (* (a 1) (dp 0)))]))]
+        {:ee ee
+         :J [(vec (map #(nth % 0) cols))
+             (vec (map #(nth % 1) cols))
+             (vec (map #(nth % 2) cols))]})
+      (let [r-origin (rot-rpy (franka-fk-rpy-r i))
+            r-q      (rot-z (nth q i))
+            r-i-in-p (mat3-mul-small r-origin r-q)
+            rotated  (matvec3-small r-world (franka-fk-xyz i))
+            p-world' (vec (map + p-world rotated))
+            r-world' (mat3-mul-small r-world r-i-in-p)]
+        (recur (inc i) r-world' p-world' (conj poses-r r-world') (conj poses-p p-world'))))))
+
+(def franka-fk-jacobian-kernel
+  (wgpu/wgpu-kernel
+    {:js (fn [q-in out-buf]
+           (let [env  (wp/tid)
+                 q    (vec (for [j (range 7)] (wp/wp-get q-in (+ (* env 7) j))))
+                 {:keys [ee J]} (franka-fk-jacobian-inline q)
+                 base (* env 24)]
+             (wp/wp-set out-buf (+ base 0) (ee 0))
+             (wp/wp-set out-buf (+ base 1) (ee 1))
+             (wp/wp-set out-buf (+ base 2) (ee 2))
+             (doseq [r (range 3) c (range 7)]
+               (wp/wp-set out-buf (+ base 3 (* r 7) c) (get-in J [r c])))))
+     :wgsl "
+@group(0) @binding(0) var<storage, read_write> q_in:    array<f32>;
+@group(0) @binding(1) var<storage, read_write> out_buf: array<f32>;
+
+fn rot_rpy_x(r: f32) -> mat3x3<f32> {
+  let cr = cos(r); let sr = sin(r);
+  return mat3x3<f32>(
+    vec3<f32>(1.0, 0.0, 0.0),
+    vec3<f32>(0.0, cr, sr),
+    vec3<f32>(0.0, -sr, cr),
+  );
+}
+
+fn rot_z(angle: f32) -> mat3x3<f32> {
+  let c = cos(angle); let s = sin(angle);
+  return mat3x3<f32>(
+    vec3<f32>(c, s, 0.0),
+    vec3<f32>(-s, c, 0.0),
+    vec3<f32>(0.0, 0.0, 1.0),
+  );
+}
+
+@compute @workgroup_size(64)
+fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
+  let env = gid.x;
+  let n_envs = arrayLength(&out_buf) / 24u;
+  if (env >= n_envs) { return; }
+
+  let base_q = env * 7u;
+  let q = array<f32, 7>(
+    q_in[base_q + 0u], q_in[base_q + 1u], q_in[base_q + 2u], q_in[base_q + 3u],
+    q_in[base_q + 4u], q_in[base_q + 5u], q_in[base_q + 6u],
+  );
+
+  let half_pi: f32 = 1.5707963267948966;
+  let xyz = array<vec3<f32>, 7>(
+    vec3<f32>(0.0,      0.0,     0.333),
+    vec3<f32>(0.0,      0.0,     0.0),
+    vec3<f32>(0.0,     -0.316,   0.0),
+    vec3<f32>(0.0825,   0.0,     0.0),
+    vec3<f32>(-0.0825,  0.384,   0.0),
+    vec3<f32>(0.0,      0.0,     0.0),
+    vec3<f32>(0.088,    0.0,     0.0),
+  );
+  let rpy_r = array<f32, 7>(0.0, -half_pi, half_pi, half_pi, -half_pi, half_pi, half_pi);
+
+  // Pass 1: forward kinematics, store every joint's world-frame pose.
+  var poses_R: array<mat3x3<f32>, 7>;
+  var poses_p: array<vec3<f32>, 7>;
+  var R_world = mat3x3<f32>(
+    vec3<f32>(1.0, 0.0, 0.0),
+    vec3<f32>(0.0, 1.0, 0.0),
+    vec3<f32>(0.0, 0.0, 1.0),
+  );
+  var p_world = vec3<f32>(0.0, 0.0, 0.0);
+  for (var i = 0u; i < 7u; i = i + 1u) {
+    let R_origin = rot_rpy_x(rpy_r[i]);
+    let R_q = rot_z(q[i]);
+    let R_iInP = R_origin * R_q;
+    let rotated = R_world * xyz[i];
+    p_world = p_world + rotated;
+    R_world = R_world * R_iInP;
+    poses_R[i] = R_world;
+    poses_p[i] = p_world;
+  }
+
+  let ee_pos = poses_p[6];
+  let base_out = env * 24u;
+  out_buf[base_out + 0u] = ee_pos.x;
+  out_buf[base_out + 1u] = ee_pos.y;
+  out_buf[base_out + 2u] = ee_pos.z;
+
+  // Pass 2: Jacobian columns J[:,i] = axis_world_i x (p_ee - p_i)
+  // axis_world_i = R_world_i . (0,0,1) = third column of R_world_i
+  for (var i = 0u; i < 7u; i = i + 1u) {
+    let Ri = poses_R[i];
+    let a_world = vec3<f32>(Ri[2].x, Ri[2].y, Ri[2].z);
+    let dp = ee_pos - poses_p[i];
+    let col = vec3<f32>(
+      a_world.y * dp.z - a_world.z * dp.y,
+      a_world.z * dp.x - a_world.x * dp.z,
+      a_world.x * dp.y - a_world.y * dp.x,
+    );
+    out_buf[base_out + 3u + 0u * 7u + i] = col.x;
+    out_buf[base_out + 3u + 1u * 7u + i] = col.y;
+    out_buf[base_out + 3u + 2u * 7u + i] = col.z;
+  }
+}
+"
+     :bindings [(assoc (wgpu/storage-binding 0 0) :writeback false)
+                (wgpu/storage-binding 1 1)]
+     :workgroup-size 64}))
+
+;; ── Franka full DLS-IK reach step (env-parallel) ──────────────────────────
+;;
+;; All-in-one IK kernel -- combines FK + linear Jacobian + a 3x3 cofactor
+;; DLS (damped least-squares) solve into one GPU-side step:
+;;   1. FK -> per-joint poses (via franka-fk-jacobian-inline)
+;;   2. err = target - p_ee
+;;   3. A = J*J^T + lambda^2*I   (3x3, symmetric)
+;;   4. A^-1 via closed-form cofactor expansion
+;;   5. y = A^-1 * err
+;;   6. dq = J^T * y             (7-vec)
+;;   7. q_new = q + alpha*dq     (semi-implicit-equivalent step)
+;;
+;; Per-env input: q[7] + target[3] = 10 floats. Per-env output: q_new[7]
+;; (written in-place over q-inout). Uniforms: lambda (DLS damping), alpha
+;; (step gain).
+;;
+;; Bindings: q-inout (storage read_write, N*7 floats -- q is overwritten),
+;; target-in (storage read, N*3 floats, writeback false), lambda (uniform),
+;; alpha (uniform).
+
+(defn franka-reach-step-inline
+  "Reference Franka one-step DLS IK in pure Clojure -- used by
+  franka-reach-kernel's :js fallback AND callable directly. Performs one
+  damped-least-squares IK step (A = J*J^T + lambda^2*I, solved via a
+  closed-form 3x3 cofactor inverse) and returns the new q[7]. Returns q
+  unchanged when det(A) is (numerically) singular, matching the source's
+  early-return guard."
+  [q target lambda alpha]
+  (let [{:keys [ee J]} (franka-fk-jacobian-inline q)
+        [j0 j1 j2] J
+        dot7 (fn [a b] (reduce + (map * a b)))
+        err  [(- (target 0) (ee 0)) (- (target 1) (ee 1)) (- (target 2) (ee 2))]
+        lam2 (* lambda lambda)
+        A00  (+ lam2 (dot7 j0 j0))
+        A01  (dot7 j0 j1)
+        A02  (dot7 j0 j2)
+        A11  (+ lam2 (dot7 j1 j1))
+        A12  (dot7 j1 j2)
+        A22  (+ lam2 (dot7 j2 j2))
+        det  (+ (- (* A00 (- (* A11 A22) (* A12 A12)))
+                    (* A01 (- (* A01 A22) (* A12 A02))))
+                 (* A02 (- (* A01 A12) (* A11 A02))))]
+    (if (< (Math/abs det) 1e-18)
+      (vec q)
+      (let [inv-det (/ 1.0 det)
+            inv00 (* (- (* A11 A22) (* A12 A12)) inv-det)
+            inv01 (* (- (* A02 A12) (* A01 A22)) inv-det)
+            inv02 (* (- (* A01 A12) (* A02 A11)) inv-det)
+            inv11 (* (- (* A00 A22) (* A02 A02)) inv-det)
+            inv12 (* (- (* A02 A01) (* A00 A12)) inv-det)
+            inv22 (* (- (* A00 A11) (* A01 A01)) inv-det)
+            y0 (+ (* inv00 (err 0)) (* inv01 (err 1)) (* inv02 (err 2)))
+            y1 (+ (* inv01 (err 0)) (* inv11 (err 1)) (* inv12 (err 2)))
+            y2 (+ (* inv02 (err 0)) (* inv12 (err 1)) (* inv22 (err 2)))]
+        (vec (for [i (range 7)]
+               (+ (nth q i) (* alpha (+ (* (j0 i) y0) (* (j1 i) y1) (* (j2 i) y2))))))))))
+
+(def franka-reach-kernel
+  (wgpu/wgpu-kernel
+    {:js (fn [q-inout target-in lambda alpha]
+           (let [env    (wp/tid)
+                 base   (* env 7)
+                 q      (vec (for [j (range 7)] (wp/wp-get q-inout (+ base j))))
+                 tbase  (* env 3)
+                 target (vec (for [j (range 3)] (wp/wp-get target-in (+ tbase j))))
+                 q-new  (franka-reach-step-inline q target lambda alpha)]
+             (dotimes [i 7]
+               (wp/wp-set q-inout (+ base i) (q-new i)))))
+     :wgsl "
+@group(0) @binding(0) var<storage, read_write> q_inout:   array<f32>;
+@group(0) @binding(1) var<storage, read_write> target_in: array<f32>;
+@group(0) @binding(2) var<uniform>             lambda_u:  vec4<f32>;
+@group(0) @binding(3) var<uniform>             alpha_u:   vec4<f32>;
+
+fn rot_rpy_x(r: f32) -> mat3x3<f32> {
+  let cr = cos(r); let sr = sin(r);
+  return mat3x3<f32>(
+    vec3<f32>(1.0, 0.0, 0.0),
+    vec3<f32>(0.0, cr, sr),
+    vec3<f32>(0.0, -sr, cr),
+  );
+}
+
+fn rot_z(angle: f32) -> mat3x3<f32> {
+  let c = cos(angle); let s = sin(angle);
+  return mat3x3<f32>(
+    vec3<f32>(c, s, 0.0),
+    vec3<f32>(-s, c, 0.0),
+    vec3<f32>(0.0, 0.0, 1.0),
+  );
+}
+
+@compute @workgroup_size(64)
+fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
+  let env = gid.x;
+  let n_envs = arrayLength(&q_inout) / 7u;
+  if (env >= n_envs) { return; }
+
+  let base_q = env * 7u;
+  let base_t = env * 3u;
+  var q = array<f32, 7>(
+    q_inout[base_q + 0u], q_inout[base_q + 1u], q_inout[base_q + 2u], q_inout[base_q + 3u],
+    q_inout[base_q + 4u], q_inout[base_q + 5u], q_inout[base_q + 6u],
+  );
+  let target = vec3<f32>(target_in[base_t + 0u], target_in[base_t + 1u], target_in[base_t + 2u]);
+
+  let half_pi: f32 = 1.5707963267948966;
+  let xyz = array<vec3<f32>, 7>(
+    vec3<f32>(0.0,      0.0,     0.333),
+    vec3<f32>(0.0,      0.0,     0.0),
+    vec3<f32>(0.0,     -0.316,   0.0),
+    vec3<f32>(0.0825,   0.0,     0.0),
+    vec3<f32>(-0.0825,  0.384,   0.0),
+    vec3<f32>(0.0,      0.0,     0.0),
+    vec3<f32>(0.088,    0.0,     0.0),
+  );
+  let rpy_r = array<f32, 7>(0.0, -half_pi, half_pi, half_pi, -half_pi, half_pi, half_pi);
+
+  // ── Pass 1: FK with stored joint poses ──
+  var poses_R: array<mat3x3<f32>, 7>;
+  var poses_p: array<vec3<f32>, 7>;
+  var R_world = mat3x3<f32>(
+    vec3<f32>(1.0, 0.0, 0.0),
+    vec3<f32>(0.0, 1.0, 0.0),
+    vec3<f32>(0.0, 0.0, 1.0),
+  );
+  var p_world = vec3<f32>(0.0, 0.0, 0.0);
+  for (var i = 0u; i < 7u; i = i + 1u) {
+    let R_origin = rot_rpy_x(rpy_r[i]);
+    let R_q = rot_z(q[i]);
+    let R_iInP = R_origin * R_q;
+    let rotated = R_world * xyz[i];
+    p_world = p_world + rotated;
+    R_world = R_world * R_iInP;
+    poses_R[i] = R_world;
+    poses_p[i] = p_world;
+  }
+  let ee_pos = poses_p[6];
+
+  // ── Pass 2: Linear Jacobian columns ──
+  var J: array<vec3<f32>, 7>;   // 7 cols of (vx, vy, vz)
+  for (var i = 0u; i < 7u; i = i + 1u) {
+    let Ri = poses_R[i];
+    let a_world = vec3<f32>(Ri[2].x, Ri[2].y, Ri[2].z);
+    let dp = ee_pos - poses_p[i];
+    J[i] = vec3<f32>(
+      a_world.y * dp.z - a_world.z * dp.y,
+      a_world.z * dp.x - a_world.x * dp.z,
+      a_world.x * dp.y - a_world.y * dp.x,
+    );
+  }
+
+  // ── Pass 3: error ──
+  let err = target - ee_pos;
+
+  // ── Pass 4: A = J.J^T + lambda^2.I (3x3) ──
+  let lam = lambda_u.x;
+  let lam2 = lam * lam;
+  var A00 = lam2; var A01 = 0.0; var A02 = 0.0;
+  var A11 = lam2; var A12 = 0.0;
+  var A22 = lam2;
+  for (var i = 0u; i < 7u; i = i + 1u) {
+    A00 = A00 + J[i].x * J[i].x;
+    A01 = A01 + J[i].x * J[i].y;
+    A02 = A02 + J[i].x * J[i].z;
+    A11 = A11 + J[i].y * J[i].y;
+    A12 = A12 + J[i].y * J[i].z;
+    A22 = A22 + J[i].z * J[i].z;
+  }
+  // A is symmetric (A10 = A01, A20 = A02, A21 = A12)
+
+  // ── Pass 5: A^-1 via cofactor expansion (3x3 closed form) ──
+  let det = A00 * (A11 * A22 - A12 * A12)
+          - A01 * (A01 * A22 - A12 * A02)
+          + A02 * (A01 * A12 - A11 * A02);
+  if (abs(det) < 1e-18) { return; }
+  let invDet = 1.0 / det;
+  let inv00 = (A11 * A22 - A12 * A12) * invDet;
+  let inv01 = (A02 * A12 - A01 * A22) * invDet;
+  let inv02 = (A01 * A12 - A02 * A11) * invDet;
+  let inv11 = (A00 * A22 - A02 * A02) * invDet;
+  let inv12 = (A02 * A01 - A00 * A12) * invDet;
+  let inv22 = (A00 * A11 - A01 * A01) * invDet;
+
+  // ── Pass 6: y = A^-1 . err (3-vec) ──
+  let y = vec3<f32>(
+    inv00 * err.x + inv01 * err.y + inv02 * err.z,
+    inv01 * err.x + inv11 * err.y + inv12 * err.z,
+    inv02 * err.x + inv12 * err.y + inv22 * err.z,
+  );
+
+  // ── Pass 7+8: Delta q = J^T . y; q_new = q + alpha.Delta q ──
+  let alpha = alpha_u.x;
+  for (var i = 0u; i < 7u; i = i + 1u) {
+    let dq_i = J[i].x * y.x + J[i].y * y.y + J[i].z * y.z;
+    q_inout[base_q + i] = q[i] + alpha * dq_i;
+  }
+}
+"
+     :bindings [(wgpu/storage-binding 0 0)
+                (assoc (wgpu/storage-binding 1 1) :writeback false)
+                (wgpu/uniform-binding 2 2)
+                (wgpu/uniform-binding 3 3)]
+     :workgroup-size 64}))
+
+;; ── Franka analytical gravity compensation (env-parallel) ─────────────────
+;;
+;; Computes tau_g(q) -- the joint torque vector that holds the Franka 7-DoF
+;; arm against gravity at configuration q (closed-form, no Featherstone
+;; needed):
+;;   1. Forward kinematics -> per-joint world poses (R_i, p_i)
+;;   2. Per-link COM in world: com_world_k = R_world_k * com_local_k + p_world_k
+;;   3. For each joint i (revolute, axis world = R_world_i's z-column):
+;;      tau_i = -(a_world_i . sum_{k>=i} [(com_world_k - p_world_i) x (m_k * g_world)])
+;;
+;; Real Franka link masses + COMs (franka_description URDF, Apache 2.0),
+;; same source as franka-fk-*'s joint xyz/rpy.
+;;
+;; Per-env input: q[7]. Per-env output: tau[7]. Uniform: gravity vec
+;; (typically (0, 0, -9.81)).
+;;
+;; NOTE (carried over from the TS source): the WGSL binding 2 uses a single
+;; vec4<f32> uniform packing (gx, gy, gz, _), but the :js fallback path
+;; below takes gx/gy/gz as three separate positional args and only binding
+;; index 2 (gx) is wired into :bindings -- gy/gz reach the :js fallback
+;; (and franka-grav-comp-inline) correctly, but a real WebGPU dispatch of
+;; this kernel would need the caller to pack the full 3-vec into the
+;; uniform buffer manually. The :js/CPU path is the canonical one for now.
+
+(def ^:private franka-masses [2.74 2.74 2.38 2.38 2.74 1.55 0.54])
+
+(def ^:private franka-com-local
+  [[0.003875 0.002081 -0.04762]
+   [-0.003141 -0.02872 0.003495]
+   [0.02785 0.03094 -0.0961]
+   [-0.05317 0.1046 0.02711]
+   [-0.01121 0.04123 -0.03825]
+   [0.065 -0.016 -0.020]
+   [0.010 0.010 0.045]])
+
+(defn franka-grav-comp-inline
+  "Reference Franka analytical gravity-compensation torque in pure Clojure.
+  gravity defaults to (0, 0, -9.81) like the TS source's default parameter.
+  tau[i] = -(a_world_i . sum_{k>=i} (com_world_k - p_world_i) x (m_k * gravity))."
+  ([q] (franka-grav-comp-inline q [0.0 0.0 -9.81]))
+  ([q gravity]
+   (loop [i 0 r-world [[1 0 0] [0 1 0] [0 0 1]] p-world [0.0 0.0 0.0]
+          poses-r [] poses-p [] com-world []]
+     (if (>= i 7)
+       (vec (for [ji (range 7)]
+              (let [ri (poses-r ji)
+                    a  [(get-in ri [0 2]) (get-in ri [1 2]) (get-in ri [2 2])]
+                    p-i (poses-p ji)
+                    [tx ty tz]
+                    (reduce (fn [[tx ty tz] k]
+                              (let [ck (com-world k)
+                                    r0 (- (ck 0) (p-i 0))
+                                    r1 (- (ck 1) (p-i 1))
+                                    r2 (- (ck 2) (p-i 2))
+                                    mk (franka-masses k)
+                                    fx (* (gravity 0) mk)
+                                    fy (* (gravity 1) mk)
+                                    fz (* (gravity 2) mk)]
+                                [(+ tx (- (* r1 fz) (* r2 fy)))
+                                 (+ ty (- (* r2 fx) (* r0 fz)))
+                                 (+ tz (- (* r0 fy) (* r1 fx)))]))
+                            [0.0 0.0 0.0] (range ji 7))]
+                (- (+ (* (a 0) tx) (* (a 1) ty) (* (a 2) tz))))))
+       (let [r-origin (rot-rpy (franka-fk-rpy-r i))
+             r-q      (rot-z (nth q i))
+             r-i-in-p (mat3-mul-small r-origin r-q)
+             rotated  (matvec3-small r-world (franka-fk-xyz i))
+             p-world' (vec (map + p-world rotated))
+             r-world' (mat3-mul-small r-world r-i-in-p)
+             c-rot    (matvec3-small r-world' (franka-com-local i))
+             com-w    (vec (map + p-world' c-rot))]
+         (recur (inc i) r-world' p-world'
+                (conj poses-r r-world') (conj poses-p p-world') (conj com-world com-w)))))))
+
+(def franka-grav-comp-kernel
+  (wgpu/wgpu-kernel
+    {:js (fn [q-in tau-out gx gy gz]
+           (let [env (wp/tid)
+                 q   (vec (for [i (range 7)] (wp/wp-get q-in (+ (* env 7) i))))
+                 tau (franka-grav-comp-inline q [gx gy gz])]
+             (dotimes [i 7]
+               (wp/wp-set tau-out (+ (* env 7) i) (tau i)))))
+     :wgsl "
+@group(0) @binding(0) var<storage, read_write> q_in:    array<f32>;
+@group(0) @binding(1) var<storage, read_write> tau_out: array<f32>;
+@group(0) @binding(2) var<uniform>             g_u:     vec4<f32>;
+
+fn rot_rpy_x(r: f32) -> mat3x3<f32> {
+  let cr = cos(r); let sr = sin(r);
+  return mat3x3<f32>(
+    vec3<f32>(1.0, 0.0, 0.0),
+    vec3<f32>(0.0, cr, sr),
+    vec3<f32>(0.0, -sr, cr),
+  );
+}
+
+fn rot_z(angle: f32) -> mat3x3<f32> {
+  let c = cos(angle); let s = sin(angle);
+  return mat3x3<f32>(
+    vec3<f32>(c, s, 0.0),
+    vec3<f32>(-s, c, 0.0),
+    vec3<f32>(0.0, 0.0, 1.0),
+  );
+}
+
+@compute @workgroup_size(64)
+fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
+  let env = gid.x;
+  let n_envs = arrayLength(&tau_out) / 7u;
+  if (env >= n_envs) { return; }
+
+  let base = env * 7u;
+  let q = array<f32, 7>(
+    q_in[base + 0u], q_in[base + 1u], q_in[base + 2u], q_in[base + 3u],
+    q_in[base + 4u], q_in[base + 5u], q_in[base + 6u],
+  );
+
+  let half_pi: f32 = 1.5707963267948966;
+  let xyz = array<vec3<f32>, 7>(
+    vec3<f32>(0.0,      0.0,     0.333),
+    vec3<f32>(0.0,      0.0,     0.0),
+    vec3<f32>(0.0,     -0.316,   0.0),
+    vec3<f32>(0.0825,   0.0,     0.0),
+    vec3<f32>(-0.0825,  0.384,   0.0),
+    vec3<f32>(0.0,      0.0,     0.0),
+    vec3<f32>(0.088,    0.0,     0.0),
+  );
+  let rpy_r = array<f32, 7>(0.0, -half_pi, half_pi, half_pi, -half_pi, half_pi, half_pi);
+
+  // Real Franka link masses + COMs (iter 87)
+  let masses = array<f32, 7>(2.74, 2.74, 2.38, 2.38, 2.74, 1.55, 0.54);
+  let com_local = array<vec3<f32>, 7>(
+    vec3<f32>(0.003875,   0.002081,   -0.04762),
+    vec3<f32>(-0.003141,  -0.02872,    0.003495),
+    vec3<f32>(0.02785,    0.03094,    -0.0961),
+    vec3<f32>(-0.05317,   0.1046,      0.02711),
+    vec3<f32>(-0.01121,   0.04123,    -0.03825),
+    vec3<f32>(0.065,     -0.016,      -0.020),
+    vec3<f32>(0.010,      0.010,       0.045),
+  );
+
+  let g = vec3<f32>(g_u.x, g_u.y, g_u.z);
+
+  // Pass 1: forward kinematics, store per-joint pose + per-link COM world
+  var poses_R: array<mat3x3<f32>, 7>;
+  var poses_p: array<vec3<f32>, 7>;
+  var com_world: array<vec3<f32>, 7>;
+  var R_world = mat3x3<f32>(
+    vec3<f32>(1.0, 0.0, 0.0),
+    vec3<f32>(0.0, 1.0, 0.0),
+    vec3<f32>(0.0, 0.0, 1.0),
+  );
+  var p_world = vec3<f32>(0.0, 0.0, 0.0);
+  for (var i = 0u; i < 7u; i = i + 1u) {
+    let R_origin = rot_rpy_x(rpy_r[i]);
+    let R_q = rot_z(q[i]);
+    let R_iInP = R_origin * R_q;
+    let rotated = R_world * xyz[i];
+    p_world = p_world + rotated;
+    R_world = R_world * R_iInP;
+    poses_R[i] = R_world;
+    poses_p[i] = p_world;
+    com_world[i] = R_world * com_local[i] + p_world;
+  }
+
+  // Pass 2: per-joint gravity torque via cross-product accumulation
+  // tau_i = a_world_i . sum_{k>=i} (com_world_k - p_world_i) x (m_k . g_world)
+  for (var i = 0u; i < 7u; i = i + 1u) {
+    let Ri = poses_R[i];
+    let a_world = vec3<f32>(Ri[2].x, Ri[2].y, Ri[2].z);
+    var torque_sum = vec3<f32>(0.0, 0.0, 0.0);
+    for (var k = i; k < 7u; k = k + 1u) {
+      let r_arm = com_world[k] - poses_p[i];
+      let F = g * masses[k];
+      // r_arm x F
+      let cross_rF = vec3<f32>(
+        r_arm.y * F.z - r_arm.z * F.y,
+        r_arm.z * F.x - r_arm.x * F.z,
+        r_arm.x * F.y - r_arm.y * F.x,
+      );
+      torque_sum = torque_sum + cross_rF;
+    }
+    // tau_i = a . torque_sum (dot product, scalar). Sign convention: tau_g compensates
+    // gravity, so we negate (tau_g such that adding it cancels the gravity-induced motion).
+    tau_out[base + i] = -(a_world.x * torque_sum.x + a_world.y * torque_sum.y + a_world.z * torque_sum.z);
+  }
+}
+"
+     :bindings [(assoc (wgpu/storage-binding 0 0) :writeback false)
+                (wgpu/storage-binding 1 1)
+                (wgpu/uniform-binding 2 2)]
+     :workgroup-size 64}))

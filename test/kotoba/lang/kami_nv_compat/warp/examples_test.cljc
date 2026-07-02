@@ -697,3 +697,242 @@
           {:binding 3 :kind :uniform :input-index 3 :writeback false}]
          (:bindings ex/ground-contact-kernel)))
   (is (= 64 (:workgroup-size ex/ground-contact-kernel))))
+
+;; ── franka-fk-jacobian-inline / franka-fk-jacobian-kernel ──────────────────
+
+(defn- closev? [a b tol] (every? true? (map #(close? %1 %2 tol) a b)))
+
+(deftest franka-fk-jacobian-inline-ee-matches-franka-fk-inline
+  (testing "the FK half of franka-fk-jacobian-inline reproduces the already-
+            verified franka-fk-inline's EE position exactly (same chain,
+            re-derived independently as part of the Jacobian computation)"
+    (let [q [0.2 -0.4 0.3 -1.8 0.15 1.0 0.5]]
+      (is (close3? (ex/franka-fk-inline q) (:ee (ex/franka-fk-jacobian-inline q)) 1e-12)))))
+
+(deftest franka-fk-jacobian-inline-matches-finite-difference
+  (testing "cross-checked against a finite-difference estimate of the same
+            Jacobian, built from franka-fk-inline (already independently
+            verified against the hand-derived home pose) perturbing each
+            q_i by 1e-6 -- NOT by calling franka-fk-jacobian-inline itself.
+            Analytic and finite-diff columns should agree to a few
+            significant figures (O(eps) truncation error)."
+    (let [q0  (vec (repeat 7 0.0))
+          eps 1e-6
+          ee0 (ex/franka-fk-inline q0)
+          fd-cols (for [i (range 7)]
+                    (let [eep (ex/franka-fk-inline (assoc q0 i eps))]
+                      (mapv #(/ (- %1 %2) eps) eep ee0)))
+          fd-J [(mapv #(nth % 0) fd-cols) (mapv #(nth % 1) fd-cols) (mapv #(nth % 2) fd-cols)]
+          analytic (:J (ex/franka-fk-jacobian-inline q0))]
+      (dotimes [r 3]
+        (is (closev? (nth fd-J r) (nth analytic r) 1e-6))))))
+
+(deftest franka-fk-jacobian-kernel-matches-franka-fk-jacobian-inline
+  (testing "dispatched through warp.warp/launch across 2 envs, the kernel's
+            :js path (ee + 3x7 J packed into a 24-float-per-env out-buf)
+            matches franka-fk-jacobian-inline called directly per env"
+    (let [envs    [[0.0 0.0 0.0 0.0 0.0 0.0 0.0] [0.2 -0.4 0.3 -1.8 0.15 1.0 0.5]]
+          q-in    (wp/wp-array (vec (apply concat envs)))
+          out-buf (wp/wp-array (vec (repeat 48 0.0)))]
+      (wp/launch {:kernel-fn (:fn ex/franka-fk-jacobian-kernel) :dim 2 :inputs [q-in out-buf]})
+      (doseq [e (range 2)]
+        (let [{:keys [ee J]} (ex/franka-fk-jacobian-inline (envs e))
+              base   (* e 24)
+              ee-out (subvec @out-buf base (+ base 3))
+              J-out  (vec (for [r (range 3)] (vec (for [c (range 7)] (nth @out-buf (+ base 3 (* r 7) c))))))]
+          (is (close3? ee ee-out 1e-12))
+          (dotimes [r 3] (is (closev? (nth J r) (nth J-out r) 1e-12))))))))
+
+(deftest franka-fk-jacobian-kernel-registers-correct-bindings
+  (is (= [{:binding 0 :kind :storage :input-index 0 :writeback false}
+          {:binding 1 :kind :storage :input-index 1 :writeback true}]
+         (:bindings ex/franka-fk-jacobian-kernel)))
+  (is (= 64 (:workgroup-size ex/franka-fk-jacobian-kernel))))
+
+;; ── franka-reach-step-inline / franka-reach-kernel ──────────────────────────
+
+(defn- solve3
+  "Fresh Gaussian elimination w/ partial pivoting for a 3x3 linear system --
+  deliberately independent of franka-reach-step-inline's closed-form
+  cofactor inverse, used only to cross-check it in
+  franka-reach-step-inline-matches-gaussian-elimination."
+  [A b]
+  (let [n   3
+        aug (mapv (fn [row bi] (conj (vec row) bi)) A b)
+        aug (reduce
+             (fn [aug col]
+               (let [piv  (apply max-key #(Math/abs (double (get-in aug [% col]))) (range col n))
+                     aug  (assoc aug col (aug piv) piv (aug col))
+                     pval (get-in aug [col col])
+                     aug  (assoc aug col (mapv #(/ % pval) (aug col)))]
+                 (reduce (fn [aug r]
+                           (if (= r col)
+                             aug
+                             (let [f (get-in aug [r col])]
+                               (assoc aug r (mapv - (aug r) (map #(* f %) (aug col)))))))
+                         aug (remove #{col} (range n)))))
+             aug (range n))]
+    (mapv #(get-in aug [% n]) (range n))))
+
+(deftest franka-reach-step-inline-matches-gaussian-elimination
+  (testing "cross-checked against a raw (non-cofactor) 3x3 Gaussian-
+            elimination solve of A*y = err, built directly from
+            franka-fk-jacobian-inline's (already independently verified)
+            ee/J -- exercises the DLS solve end to end without reusing
+            franka-reach-step-inline's own cofactor-inverse code"
+    (let [q      [0.1 -0.3 0.2 -1.5 0.1 0.8 0.3]
+          target [0.4 0.15 0.5]
+          lambda 0.05
+          alpha  0.2
+          {:keys [ee J]} (ex/franka-fk-jacobian-inline q)
+          [j0 j1 j2] J
+          dot  (fn [a b] (reduce + (map * a b)))
+          err  [(- (target 0) (ee 0)) (- (target 1) (ee 1)) (- (target 2) (ee 2))]
+          lam2 (* lambda lambda)
+          A    [[(+ lam2 (dot j0 j0)) (dot j0 j1) (dot j0 j2)]
+                [(dot j1 j0) (+ lam2 (dot j1 j1)) (dot j1 j2)]
+                [(dot j2 j0) (dot j2 j1) (+ lam2 (dot j2 j2))]]
+          y    (solve3 A err)
+          dq   (mapv (fn [i] (+ (* (j0 i) (y 0)) (* (j1 i) (y 1)) (* (j2 i) (y 2)))) (range 7))
+          expected (mapv (fn [qi dqi] (+ qi (* alpha dqi))) q dq)
+          actual   (ex/franka-reach-step-inline q target lambda alpha)]
+      (is (closev? expected actual 1e-9)))))
+
+(deftest franka-reach-step-inline-fixed-point-when-target-already-reached
+  (testing "err=0 (target == current EE) -> y=0 -> dq=0 -> q_new == q,
+            regardless of lambda/alpha"
+    (let [q  [0.1 0.2 0.3 0.4 0.5 0.6 0.7]
+          ee (:ee (ex/franka-fk-jacobian-inline q))]
+      (is (= (vec q) (ex/franka-reach-step-inline q ee 0.05 0.5))))))
+
+(deftest franka-reach-step-inline-moves-toward-target
+  (testing "one small DLS step strictly reduces the Euclidean EE-to-target
+            distance (basic IK sanity: it doesn't overshoot or diverge for
+            a small, well-damped step)"
+    (let [q       (vec (repeat 7 0.0))
+          ee0     (:ee (ex/franka-fk-jacobian-inline q))
+          target  (mapv + ee0 [0.02 0.01 -0.01])
+          dist    (fn [a b] (Math/sqrt (reduce + (map #(* % %) (map - a b)))))
+          d0      (dist ee0 target)
+          q-new   (ex/franka-reach-step-inline q target 0.05 0.3)
+          ee1     (:ee (ex/franka-fk-jacobian-inline q-new))
+          d1      (dist ee1 target)]
+      (is (< d1 d0)))))
+
+(deftest franka-reach-kernel-matches-franka-reach-step-inline
+  (testing "dispatched through warp.warp/launch, the kernel's :js path
+            (q-inout overwritten in place) matches franka-reach-step-inline
+            called directly"
+    (let [q         [0.1 -0.3 0.2 -1.5 0.1 0.8 0.3]
+          target    [0.4 0.15 0.5]
+          lambda    0.05
+          alpha     0.2
+          q-inout   (wp/wp-array (vec q))
+          target-in (wp/wp-array (vec target))]
+      (wp/launch {:kernel-fn (:fn ex/franka-reach-kernel) :dim 1
+                  :inputs [q-inout target-in lambda alpha]})
+      (is (= (ex/franka-reach-step-inline q target lambda alpha) @q-inout)))))
+
+(deftest franka-reach-kernel-registers-correct-bindings
+  (is (= [{:binding 0 :kind :storage :input-index 0 :writeback true}
+          {:binding 1 :kind :storage :input-index 1 :writeback false}
+          {:binding 2 :kind :uniform :input-index 2 :writeback false}
+          {:binding 3 :kind :uniform :input-index 3 :writeback false}]
+         (:bindings ex/franka-reach-kernel)))
+  (is (= 64 (:workgroup-size ex/franka-reach-kernel))))
+
+;; ── franka-grav-comp-inline / franka-grav-comp-kernel ───────────────────────
+;;
+;; The cross-check below is a from-scratch FK+COM chain built directly on
+;; Math/cos+Math/sin (NOT reusing examples.cljc's private rot-rpy/rot-z/
+;; mat3-mul-small/matvec3-small helpers, and NOT calling back into
+;; franka-grav-comp-inline), used to independently verify the Lagrangian
+;; identity g(q) = dU/dq: the static gravity-compensation torque equals the
+;; gradient of gravitational potential energy U(q) = sum_k m_k*g_mag*height_k
+;; w.r.t. q, evaluated via central finite differences.
+
+(def ^:private raw-half-pi (/ Math/PI 2))
+(def ^:private raw-xyz
+  [[0 0 0.333] [0 0 0] [0 -0.316 0] [0.0825 0 0] [-0.0825 0.384 0] [0 0 0] [0.088 0 0]])
+(def ^:private raw-rpy-r
+  [0 (- raw-half-pi) raw-half-pi raw-half-pi (- raw-half-pi) raw-half-pi raw-half-pi])
+(def ^:private raw-masses [2.74 2.74 2.38 2.38 2.74 1.55 0.54])
+(def ^:private raw-com-local
+  [[0.003875 0.002081 -0.04762] [-0.003141 -0.02872 0.003495]
+   [0.02785 0.03094 -0.0961] [-0.05317 0.1046 0.02711]
+   [-0.01121 0.04123 -0.03825] [0.065 -0.016 -0.020] [0.010 0.010 0.045]])
+
+(defn- raw-mm3 [a b]
+  (vec (for [i (range 3)] (vec (for [j (range 3)] (reduce + (for [k (range 3)] (* (get-in a [i k]) (get-in b [k j])))))))))
+(defn- raw-mv3 [m v] (vec (for [i (range 3)] (reduce + (for [j (range 3)] (* (get-in m [i j]) (v j)))))))
+(defn- raw-rx [r] (let [c (Math/cos r) s (Math/sin r)] [[1 0 0] [0 c (- s)] [0 s c]]))
+(defn- raw-rz [a] (let [c (Math/cos a) s (Math/sin a)] [[c (- s) 0] [s c 0] [0 0 1]]))
+
+(defn- raw-com-world-all [q]
+  (loop [i 0 R [[1 0 0] [0 1 0] [0 0 1]] p [0.0 0.0 0.0] coms []]
+    (if (>= i 7)
+      coms
+      (let [Ro (raw-rx (raw-rpy-r i)) Rq (raw-rz (nth q i)) R-i-in-p (raw-mm3 Ro Rq)
+            rotated (raw-mv3 R (raw-xyz i)) p' (mapv + p rotated) R' (raw-mm3 R R-i-in-p)
+            c-rot (raw-mv3 R' (raw-com-local i)) com-w (mapv + p' c-rot)]
+        (recur (inc i) R' p' (conj coms com-w))))))
+
+(defn- raw-U-std
+  "Standard-sign potential energy: U = sum_k m_k * g_mag * height_k, i.e.
+  U = sum_k -m_k*(gravity . com_k) for a downward gravity vector. Standard
+  manipulator dynamics has g(q) = dU/dq equal to the static gravity-
+  compensation torque."
+  [q gravity]
+  (let [coms (raw-com-world-all q)]
+    (reduce + (for [k (range 7)] (* -1.0 (raw-masses k) (reduce + (map * gravity (coms k))))))))
+
+(deftest franka-grav-comp-inline-matches-potential-energy-finite-difference
+  (testing "tau_g[i] ~= dU/dq_i (central finite diff, eps=1e-6) against a
+            from-scratch FK+COM chain and standard-sign potential energy --
+            an independent physics identity, not a re-derivation of the
+            kernel's own cross-product bookkeeping"
+    (let [q       [0.2 -0.4 0.3 -1.8 0.15 1.0 0.5]
+          gravity [0.0 0.0 -9.81]
+          eps     1e-6
+          fd-tau  (vec (for [i (range 7)]
+                         (/ (- (raw-U-std (update q i + eps) gravity)
+                               (raw-U-std (update q i - eps) gravity))
+                            (* 2 eps))))
+          actual  (ex/franka-grav-comp-inline q gravity)]
+      (is (closev? fd-tau actual 1e-5)))))
+
+(deftest franka-grav-comp-inline-default-gravity-matches-explicit
+  (testing "the 1-arity default gravity (0,0,-9.81) matches passing it explicitly"
+    (let [q [0.2 -0.4 0.3 -1.8 0.15 1.0 0.5]]
+      (is (= (ex/franka-grav-comp-inline q) (ex/franka-grav-comp-inline q [0.0 0.0 -9.81]))))))
+
+(deftest franka-grav-comp-kernel-matches-franka-grav-comp-inline
+  (testing "dispatched through warp.warp/launch, the kernel's :js path
+            (gx/gy/gz taken as 3 separate positional args, per the TS
+            source's documented single-vec4-uniform limitation) matches
+            franka-grav-comp-inline called directly"
+    (let [q       [0.2 -0.4 0.3 -1.8 0.15 1.0 0.5]
+          gravity [0.0 0.0 -9.81]
+          q-in    (wp/wp-array (vec q))
+          tau-out (wp/wp-array (vec (repeat 7 0.0)))]
+      (wp/launch {:kernel-fn (:fn ex/franka-grav-comp-kernel) :dim 1
+                  :inputs (into [q-in tau-out] gravity)})
+      (is (= (ex/franka-grav-comp-inline q gravity) @tau-out)))))
+
+(deftest franka-grav-comp-kernel-batches-independent-envs
+  (testing "dim=N runs N independent envs (env*7 offsets don't collide)"
+    (let [envs    [[0.0 0.0 0.0 0.0 0.0 0.0 0.0] [0.2 -0.4 0.3 -1.8 0.15 1.0 0.5]]
+          gravity [0.0 0.0 -9.81]
+          q-in    (wp/wp-array (vec (apply concat envs)))
+          tau-out (wp/wp-array (vec (repeat 14 0.0)))]
+      (wp/launch {:kernel-fn (:fn ex/franka-grav-comp-kernel) :dim 2
+                  :inputs (into [q-in tau-out] gravity)})
+      (is (closev? (ex/franka-grav-comp-inline (first envs) gravity) (subvec @tau-out 0 7) 1e-12))
+      (is (closev? (ex/franka-grav-comp-inline (second envs) gravity) (subvec @tau-out 7 14) 1e-12)))))
+
+(deftest franka-grav-comp-kernel-registers-correct-bindings
+  (is (= [{:binding 0 :kind :storage :input-index 0 :writeback false}
+          {:binding 1 :kind :storage :input-index 1 :writeback true}
+          {:binding 2 :kind :uniform :input-index 2 :writeback false}]
+         (:bindings ex/franka-grav-comp-kernel)))
+  (is (= 64 (:workgroup-size ex/franka-grav-comp-kernel))))
