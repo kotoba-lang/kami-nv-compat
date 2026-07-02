@@ -19,7 +19,15 @@
   the 3 self-contained physics-step kernels (damping, pendulum, cartpole)
   with no \"Inline\" companion. Wave 46: two-link-arm-step-kernel — a
   closed-form 2-DoF planar arm (M(q)*q_ddot + C*q_dot + g(q) = tau, 2x2
-  matrix inverse by hand); also no \"Inline\" companion.
+  matrix inverse by hand); also no \"Inline\" companion. Wave 47:
+  franka-fk-kernel + franka-fk-inline — the first of 4 Franka-arm kernels
+  (FK is the foundation the Jacobian/reach/gravity-comp kernels build on,
+  each its own later wave). franka-fk-inline is deliberately self-contained
+  (own private rot-rpy/rot-z/mat3-mul-small/matvec3-small helpers) rather
+  than routing through dynamics.articulated-dynamics — matches the TS
+  source's own structure, which needs the same standalone-compilable-as-
+  WGSL property every kernel here has; the joint xyz/rpy data matches
+  assets.franka-panda's URDF origins (same canonical source).
 
   Note: cartpole-step-kernel's semi-implicit-Euler integration order
   (compute the NEW velocity, then integrate position using that NEW
@@ -346,4 +354,177 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
                 (wgpu/uniform-binding 7 7)
                 (wgpu/uniform-binding 8 8)
                 (wgpu/uniform-binding 9 9)]
+     :workgroup-size 64}))
+
+;; ── Franka 7-DoF forward kinematics (env-parallel) ────────────────────────
+;;
+;; Computes EE position for N envs in parallel from per-env q[7]. Real
+;; Franka FCI joint origins (matching assets/franka-panda's URDF xyz/rpy
+;; data — same canonical source, but this is a lightweight, self-contained
+;; FK loop rather than routing through the heavier dynamics.articulated-
+;; dynamics machinery; algorithm-for-algorithm port of the TS kernel, which
+;; is deliberately self-contained so it also compiles standalone as WGSL).
+;;
+;; Storage layout (struct-of-arrays for coalesced GPU access):
+;;   q-in:   length 7*N — q[i] = q-in[env*7 + i]
+;;   ee-out: length 3*N — ee[i] = ee-out[env*3 + i]
+;;
+;; Algorithm: 7 successive frame compositions. Each joint applies
+;;   R_origin (from URDF rpy) . Rodrigues(axis_body_z, q_i)
+;; to the cumulative world-frame rotation, plus xyz translation.
+;;
+;; Bindings: q-in (storage read, N*7 floats, writeback false), ee-out
+;; (storage read_write, N*3 floats).
+
+(def ^:private franka-fk-half-pi (/ Math/PI 2))
+
+(def ^:private franka-fk-xyz
+  [[0 0 0.333]
+   [0 0 0]
+   [0 -0.316 0]
+   [0.0825 0 0]
+   [-0.0825 0.384 0]
+   [0 0 0]
+   [0.088 0 0]])
+
+(def ^:private franka-fk-rpy-r
+  [0 (- franka-fk-half-pi) franka-fk-half-pi franka-fk-half-pi
+   (- franka-fk-half-pi) franka-fk-half-pi franka-fk-half-pi])
+
+(defn- rot-rpy
+  "p=y=0 for every Franka joint origin, so only the x-rotation term survives."
+  [r]
+  (let [cr (wp/cos r) sr (wp/sin r)]
+    [[1 0 0] [0 cr (- sr)] [0 sr cr]]))
+
+(defn- rot-z [angle]
+  (let [c (wp/cos angle) s (wp/sin angle)]
+    [[c (- s) 0] [s c 0] [0 0 1]]))
+
+(defn- mat3-mul-small [a b]
+  (vec (for [i (range 3)]
+         (vec (for [j (range 3)]
+                (reduce + (for [k (range 3)] (* (get-in a [i k]) (get-in b [k j])))))))))
+
+(defn- matvec3-small [m v]
+  [(+ (* (get-in m [0 0]) (v 0)) (* (get-in m [0 1]) (v 1)) (* (get-in m [0 2]) (v 2)))
+   (+ (* (get-in m [1 0]) (v 0)) (* (get-in m [1 1]) (v 1)) (* (get-in m [1 2]) (v 2)))
+   (+ (* (get-in m [2 0]) (v 0)) (* (get-in m [2 1]) (v 1)) (* (get-in m [2 2]) (v 2)))])
+
+(defn franka-fk-inline
+  "Reference Franka 7-DoF FK in pure Clojure — used by the kernel's :js
+  fallback AND callable directly for cross-validation. Returns the
+  world-frame EE position [x y z] from q (a 7-element seq of joint angles)."
+  [q]
+  (loop [i 0 r-world [[1 0 0] [0 1 0] [0 0 1]] p-world [0.0 0.0 0.0]]
+    (if (>= i 7)
+      p-world
+      (let [r-origin (rot-rpy (franka-fk-rpy-r i))
+            r-q      (rot-z (nth q i))
+            r-i-in-p (mat3-mul-small r-origin r-q)
+            rotated  (matvec3-small r-world (franka-fk-xyz i))
+            p-world' (vec (map + p-world rotated))
+            r-world' (mat3-mul-small r-world r-i-in-p)]
+        (recur (inc i) r-world' p-world')))))
+
+(def franka-fk-kernel
+  (wgpu/wgpu-kernel
+    {:js (fn [q-in ee-out]
+           (let [env (wp/tid)
+                 q   (vec (for [j (range 7)] (wp/wp-get q-in (+ (* env 7) j))))
+                 ee  (franka-fk-inline q)]
+             (wp/wp-set ee-out (+ (* env 3) 0) (ee 0))
+             (wp/wp-set ee-out (+ (* env 3) 1) (ee 1))
+             (wp/wp-set ee-out (+ (* env 3) 2) (ee 2))))
+     :wgsl "
+// Real Franka FCI joint origins (xyz triplet + rpy triplet per joint).
+// Pre-computed: cos/sin of rpy values inlined as constants for speed.
+// rpy values: (0,0,0), (-pi/2,0,0), (pi/2,0,0), (pi/2,0,0), (-pi/2,0,0), (pi/2,0,0), (pi/2,0,0)
+
+@group(0) @binding(0) var<storage, read_write> q_in:    array<f32>;
+@group(0) @binding(1) var<storage, read_write> ee_out:  array<f32>;
+
+// Composed rotation R_world (3x3) stored row-major in 9 f32 locals.
+// p_world stored in 3 f32 locals.
+// Applies R_world <- R_world . R_origin . R_q (axis z, angle q[i])
+// and p_world <- p_world + R_world_pre . xyz.
+
+fn rot_rpy(r: f32, p: f32, y: f32) -> mat3x3<f32> {
+  let cr = cos(r); let sr = sin(r);
+  let cp = cos(p); let sp = sin(p);
+  let cy = cos(y); let sy = sin(y);
+  return mat3x3<f32>(
+    vec3<f32>(cy*cp, sy*cp, -sp),
+    vec3<f32>(cy*sp*sr - sy*cr, sy*sp*sr + cy*cr, cp*sr),
+    vec3<f32>(cy*sp*cr + sy*sr, sy*sp*cr - cy*sr, cp*cr),
+  );
+}
+
+fn rot_z(angle: f32) -> mat3x3<f32> {
+  let c = cos(angle); let s = sin(angle);
+  return mat3x3<f32>(
+    vec3<f32>(c, s, 0.0),
+    vec3<f32>(-s, c, 0.0),
+    vec3<f32>(0.0, 0.0, 1.0),
+  );
+}
+
+@compute @workgroup_size(64)
+fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
+  let env = gid.x;
+  let n_envs = arrayLength(&ee_out) / 3u;
+  if (env >= n_envs) { return; }
+
+  let base = env * 7u;
+  let q = array<f32, 7>(
+    q_in[base + 0u], q_in[base + 1u], q_in[base + 2u], q_in[base + 3u],
+    q_in[base + 4u], q_in[base + 5u], q_in[base + 6u],
+  );
+
+  let half_pi: f32 = 1.5707963267948966;
+  // Joint origins: xyz vec3 + rpy.r (rpy.p, rpy.y are 0 for all Franka joints)
+  let xyz = array<vec3<f32>, 7>(
+    vec3<f32>(0.0,      0.0,     0.333),
+    vec3<f32>(0.0,      0.0,     0.0),
+    vec3<f32>(0.0,     -0.316,   0.0),
+    vec3<f32>(0.0825,   0.0,     0.0),
+    vec3<f32>(-0.0825,  0.384,   0.0),
+    vec3<f32>(0.0,      0.0,     0.0),
+    vec3<f32>(0.088,    0.0,     0.0),
+  );
+  let rpy_r = array<f32, 7>(
+    0.0,
+    -half_pi,
+    half_pi,
+    half_pi,
+    -half_pi,
+    half_pi,
+    half_pi,
+  );
+
+  var R_world = mat3x3<f32>(
+    vec3<f32>(1.0, 0.0, 0.0),
+    vec3<f32>(0.0, 1.0, 0.0),
+    vec3<f32>(0.0, 0.0, 1.0),
+  );
+  var p_world = vec3<f32>(0.0, 0.0, 0.0);
+
+  for (var i = 0u; i < 7u; i = i + 1u) {
+    let R_origin = rot_rpy(rpy_r[i], 0.0, 0.0);
+    let R_q = rot_z(q[i]);
+    let R_iInP = R_origin * R_q;
+    // p contribution: rotated xyz, in current world frame (before this
+    // joint's rotation).
+    let rotated = R_world * xyz[i];
+    p_world = p_world + rotated;
+    R_world = R_world * R_iInP;
+  }
+
+  ee_out[env * 3u + 0u] = p_world.x;
+  ee_out[env * 3u + 1u] = p_world.y;
+  ee_out[env * 3u + 2u] = p_world.z;
+}
+"
+     :bindings [(assoc (wgpu/storage-binding 0 0) :writeback false)
+                (wgpu/storage-binding 1 1)]
      :workgroup-size 64}))
