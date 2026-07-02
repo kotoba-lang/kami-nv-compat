@@ -427,3 +427,136 @@
           {:binding 5 :kind :uniform :input-index 5 :writeback false}]
          (:bindings ex/generic-serial-fk-kernel)))
   (is (= 64 (:workgroup-size ex/generic-serial-fk-kernel))))
+
+;; ── mulberry32 / gaussian-marsaglia ────────────────────────────────────────
+;;
+;; Expected values below were independently re-derived by running the TS
+;; source's mulberry32/gaussianMarsaglia algorithm verbatim under node
+;; (not via this Clojure port), confirming the CLJC port is bit-identical
+;; to the JS reference across several seeds, including seeds >= 2^31 (where
+;; a naive signed-int32 port would diverge from the unsigned-residue
+;; semantics `>>> 0` implies).
+
+(deftest mulberry32-is-deterministic-for-a-fixed-seed
+  (testing "two freshly-seeded instances with the same seed produce an
+            identical sequence"
+    (let [a (ex/mulberry32 99) b (ex/mulberry32 99)]
+      (is (= [(a) (a) (a)] [(b) (b) (b)])))))
+
+(deftest mulberry32-different-seeds-diverge
+  (let [a (ex/mulberry32 1) b (ex/mulberry32 2)]
+    (is (not= (a) (b)))))
+
+(deftest mulberry32-matches-independent-node-oracle
+  (testing "cross-checked against `node` running the TS algorithm verbatim
+            (not this port) for several seeds, including seeds spanning the
+            2^31 signed/unsigned boundary"
+    (doseq [[seed expected]
+            [[0 [0.26642920868471265 3.297457005828619E-4 0.2232720274478197
+                 0.1462021479383111 0.46732782293111086 0.5450490827206522]]
+             [1 [0.6270739405881613 0.002735721180215478 0.5274470399599522
+                 0.9810509674716741 0.9683778982143849 0.281103502959013]]
+             [42 [0.6011037519201636 0.44829055899754167 0.8524657934904099
+                  0.6697340414393693 0.17481389874592423 0.5265925421845168]]
+             [12345 [0.9797282677609473 0.3067522644996643 0.484205421525985
+                     0.817934412509203 0.5094283693470061 0.34747186047025025]]
+             [4294967295 [0.8964226141106337 0.189478256739676 0.7156526781618595
+                          0.9440599093213677 0.8452364315744489 0.5391399988438934]]
+             [2147483648 [0.8205775609239936 0.4481089550536126 0.7836112855002284
+                          0.5120457962621003 0.8388098266441375 0.4205148529727012]]]]
+      (let [rng (ex/mulberry32 seed)]
+        (is (= expected (vec (repeatedly 6 rng))) (str "seed=" seed))))))
+
+(deftest gaussian-marsaglia-matches-independent-node-oracle
+  (testing "cross-checked against node's Math.random-free mulberry32-driven
+            Marsaglia polar sampler, run independently of this port"
+    (is (= [0.5671395738744712 -2.4985646366811625 -0.2068583132564943
+            -1.5932138444925312 0.3917699810786397 1.6884458710701966]
+           (ex/gaussian-marsaglia (ex/mulberry32 7) 6)))))
+
+(deftest gaussian-marsaglia-honors-odd-counts
+  (testing "requesting an odd count still returns exactly that many samples
+            (drops the second sample of the last accepted pair)"
+    (is (= 5 (count (ex/gaussian-marsaglia (ex/mulberry32 3) 5))))))
+
+;; ── l2-norm-squared-kernel / l2-norm-squared-inline ────────────────────────
+
+(deftest l2-norm-squared-inline-matches-hand-derivation
+  (testing "[3, 4] -> 3^2 + 4^2 = 25 (classic 3-4-5 triangle)"
+    (is (= [25.0] (ex/l2-norm-squared-inline [3.0 4.0] 2)))))
+
+(deftest l2-norm-squared-inline-batches-independent-envs
+  (is (= [25.0 1.0] (ex/l2-norm-squared-inline [3.0 4.0 1.0 0.0] 2))))
+
+(deftest l2-norm-squared-kernel-matches-inline
+  (let [x   (wp/wp-array [3.0 4.0 1.0 0.0])
+        out (wp/wp-array [0.0 0.0])]
+    (wp/launch {:kernel-fn (:fn ex/l2-norm-squared-kernel) :dim 2 :inputs [x out 2]})
+    (is (= (ex/l2-norm-squared-inline [3.0 4.0 1.0 0.0] 2) @out))))
+
+(deftest l2-norm-squared-kernel-registers-correct-bindings
+  (is (= [{:binding 0 :kind :storage :input-index 0 :writeback false}
+          {:binding 1 :kind :storage :input-index 1 :writeback true}
+          {:binding 2 :kind :uniform :input-index 2 :writeback false}]
+         (:bindings ex/l2-norm-squared-kernel)))
+  (is (= 64 (:workgroup-size ex/l2-norm-squared-kernel))))
+
+;; ── track-vel-exp-inline ────────────────────────────────────────────────────
+
+(deftest track-vel-exp-inline-matches-hand-derivation
+  (testing "vTarget=[1,0], vActual=[0,0], sigma=1 -> ||diff||^2=1,
+            reward = exp(-1) = 0.36787944117144233"
+    (is (close? 0.36787944117144233
+                (first (ex/track-vel-exp-inline [1.0 0.0] [0.0 0.0] 1.0 2))
+                1e-15))))
+
+(deftest track-vel-exp-inline-perfect-tracking-gives-reward-one
+  (is (= [1.0] (ex/track-vel-exp-inline [2.0 -1.0] [2.0 -1.0] 0.5 2))))
+
+;; ── combine-weighted-rewards ─────────────────────────────────────────────────
+
+(deftest combine-weighted-rewards-matches-hand-derivation
+  (testing "term1=[1,2] w=2, term2=[10,20] w=0.5
+            -> [1*2+10*0.5, 2*2+20*0.5] = [7, 14]"
+    (is (= [7.0 14.0] (ex/combine-weighted-rewards [[1.0 2.0] [10.0 20.0]] [2.0 0.5])))))
+
+;; ── terminations-kernel / terminations-inline ──────────────────────────────
+
+(deftest terminations-inline-matches-hand-derivation
+  (testing "env0: q in [0,1] bounds, base_z above floor, step under budget
+            -> alive. env1: q exceeds q_upper AND step over budget -> both
+            terminated and truncated"
+    (is (= {:terminated [0 1] :truncated [0 1]}
+           (ex/terminations-inline [0.1 0.2, 2.0 0.2] [0.0 0.0] [1.0 1.0]
+                                    [1.0 1.0] [5.0 15.0] 2 0.5 10.0)))))
+
+(deftest terminations-inline-base-fall-terminates-even-with-valid-joints
+  (testing "base_z below min_base_z terminates even when joints are within
+            limits and step count is low"
+    (is (= {:terminated [1] :truncated [0]}
+           (ex/terminations-inline [0.1 0.2] [0.0 0.0] [1.0 1.0] [0.1] [1.0] 2 0.5 10.0)))))
+
+(deftest terminations-kernel-matches-terminations-inline
+  (let [q          (wp/wp-array [0.1 0.2 2.0 0.2])
+        q-lower    (wp/wp-array [0.0 0.0])
+        q-upper    (wp/wp-array [1.0 1.0])
+        base-z     (wp/wp-array [1.0 1.0])
+        step       (wp/wp-array [5.0 15.0])
+        terminated (wp/wp-array [0.0 0.0])
+        truncated  (wp/wp-array [0.0 0.0])]
+    (wp/launch {:kernel-fn (:fn ex/terminations-kernel) :dim 2
+                :inputs [q q-lower q-upper base-z step terminated truncated 2 0.5 10.0]})
+    (is (= (ex/terminations-inline [0.1 0.2 2.0 0.2] [0.0 0.0] [1.0 1.0] [1.0 1.0] [5.0 15.0] 2 0.5 10.0)
+           {:terminated (mapv long @terminated) :truncated (mapv long @truncated)}))))
+
+(deftest terminations-kernel-registers-correct-bindings
+  (is (= [{:binding 0 :kind :storage :input-index 0 :writeback false}
+          {:binding 1 :kind :storage :input-index 1 :writeback false}
+          {:binding 2 :kind :storage :input-index 2 :writeback false}
+          {:binding 3 :kind :storage :input-index 3 :writeback false}
+          {:binding 4 :kind :storage :input-index 4 :writeback false}
+          {:binding 5 :kind :storage :input-index 5 :writeback true}
+          {:binding 6 :kind :storage :input-index 6 :writeback true}
+          {:binding 7 :kind :uniform :input-index 7 :writeback false}]
+         (:bindings ex/terminations-kernel)))
+  (is (= 64 (:workgroup-size ex/terminations-kernel))))

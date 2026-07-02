@@ -1076,3 +1076,281 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
                 (wgpu/storage-binding 4 4)
                 (wgpu/uniform-binding 5 5)]
      :workgroup-size 64}))
+
+;; ── mulberry32 seeded PRNG + Marsaglia polar Gaussian sampler ────────────
+;;
+;; Host-side (CPU) helpers used to drive deterministic, reproducible obs
+;; noise / domain randomization in tests and reference pipelines. No WGSL
+;; counterpart — these are pure Clojure, matching the TS source (which is
+;; also plain host-side JS, not a WgpuKernel).
+;;
+;; mulberry32 is a seeded PRNG that returns a 0-arg closure: call it
+;; repeatedly to get successive uniform floats in [0, 1), with internal
+;; mutable state threaded through an atom (the atom-per-instance mutable-
+;; closure pattern used throughout this port, e.g. utsushimi.sampler's LCG-
+;; state atom / wadachi-sim's sequence-dist cursor atom).
+;;
+;; The two 32-bit-truncating-multiply steps (`Math.imul` in the TS source)
+;; are the one place this needs platform-specific handling. On the JVM, a
+;; product of two u32 operands (each up to 0xFFFFFFFF) can reach
+;; ~1.8446744e19 — *larger* than Long/MAX_VALUE (~9.2233720e18) — so a
+;; checked `*` throws ArithmeticException, and the auto-promoting `*'`
+;; would hand back a BigInt that `bit-and`/`bit-shift-*` then reject
+;; outright ("bit operation not supported for: class clojure.lang.BigInt"
+;; — the exact failure mode this project hit before in a different LCG
+;; PRNG; see utsushimi.sampler's `+'`/`*'`/mod/quot workaround). The fix
+;; used here instead is `unchecked-multiply`: it computes the exact 64-bit
+;; two's-complement product (which always fits — max u32*u32 < 2^64), and
+;; since 2^32 divides 2^64, masking the low 32 bits afterward recovers the
+;; identical residue Math.imul would return, without ever producing a
+;; BigInt. On CLJS, numbers are already JS doubles and `Math.imul`/`>>> `
+;; are native, so the :cljs branch just calls them directly. Every value
+;; that reaches a numeric `+` here is kept as a canonical nonnegative u32
+;; residue beforehand (`u32` re-masks right after the seed-update add and
+;; right after the line-4 add), so `bit-xor`/`bit-or` never see values
+;; outside their 32-bit-clean invariant.
+
+(defn- u32
+  "Coerce to an unsigned-32-bit residue in [0, 2^32) — mirrors JS `x >>> 0`."
+  [x]
+  #?(:clj (bit-and x 0xFFFFFFFF)
+     :cljs (unsigned-bit-shift-right x 0)))
+
+(defn- imul32
+  "32-bit truncating multiply — mirrors JS `Math.imul(a, b)` (see namespace
+  comment above mulberry32 for why the JVM branch needs unchecked-multiply
+  instead of plain `*`)."
+  [a b]
+  #?(:clj (u32 (unchecked-multiply (long a) (long b)))
+     :cljs (u32 (js/Math.imul a b))))
+
+(defn mulberry32
+  "Seeded deterministic PRNG (matches TS `mulberry32`). Returns a 0-arg
+  closure that, called repeatedly, produces a deterministic, repeatable
+  sequence of uniform floats in [0, 1) for a given seed; different seeds
+  produce different sequences. Cross-checked against a from-scratch node
+  re-implementation of the TS algorithm (not this port) — seed=99 called
+  from two freshly-seeded instances gives identical sequences
+  [0.2604658124037087 0.8048227655235678 0.5408715349622071]."
+  [seed]
+  (let [state (atom (u32 seed))]
+    (fn []
+      (let [s  (u32 (+ @state 0x6d2b79f5))
+            _  (reset! state s)
+            t1 (imul32 (bit-xor s (unsigned-bit-shift-right s 15)) (bit-or s 1))
+            t2 (bit-xor t1 (u32 (+ t1 (imul32 (bit-xor t1 (unsigned-bit-shift-right t1 7))
+                                               (bit-or t1 61)))))]
+        (/ (double (u32 (bit-xor t2 (unsigned-bit-shift-right t2 14))))
+           4294967296.0)))))
+
+(defn gaussian-marsaglia
+  "Host-side Marsaglia polar Gaussian sampler. Deterministic given a
+  uniform RNG (e.g. mulberry32) so the obs-noise path can be tested
+  byte-for-byte across runs. `rng` is a 0-arg thunk returning a uniform
+  float in [0, 1); `n` is the number of Gaussian samples to draw (the TS
+  source's parameter is named `count`, renamed here since it would shadow
+  `clojure.core/count`, which this fn also calls to check the accumulated
+  output length)."
+  [rng n]
+  (loop [out []]
+    (if (>= (count out) n)
+      out
+      (let [[u v s] (loop []
+                      (let [u (- (* 2 (rng)) 1)
+                            v (- (* 2 (rng)) 1)
+                            s (+ (* u u) (* v v))]
+                        (if (or (>= s 1) (zero? s))
+                          (recur)
+                          [u v s])))
+            f    (wp/sqrt (/ (* -2 (wp/log s)) s))
+            out' (conj out (* u f))]
+        (recur (if (< (count out') n) (conj out' (* v f)) out'))))))
+
+;; ── L2-norm-squared per env (universal reward building block) ────────────
+;;
+;; Most Isaac Lab reward terms reduce to ||x||^2 of some per-env vector:
+;;   - action_l2           = ||a||^2
+;;   - action_rate_l2      = ||a_t - a_{t-1}||^2
+;;   - joint_vel_l2        = ||qdot||^2
+;;   - joint_acc_l2        = ||qddot||^2
+;;   - joint_torque_l2     = ||tau||^2
+;;   - flat_orientation_l2 = ||up_vec - z-hat||^2
+;;
+;; One thread per env iterates a bounded-d input (compile-bound 64; runtime
+;; d via uniform). Output: result[env] = sum_i x[env*d + i]^2.
+;;
+;; Compose with combine-weighted-rewards (host helper) and
+;; track-vel-exp-inline to reproduce full Isaac Lab RewardManager scoring
+;; per env.
+;;
+;; Bindings: x (storage read, writeback false), out (storage read_write),
+;; d (uniform).
+
+(def l2-norm-squared-kernel
+  (wgpu/wgpu-kernel
+    {:js (fn [x out d]
+           (let [env (wp/tid)]
+             (loop [i 0 s 0.0]
+               (if (>= i d)
+                 (wp/wp-set out env s)
+                 (let [v (wp/wp-get x (+ (* env d) i))]
+                   (recur (inc i) (+ s (* v v))))))))
+     :wgsl "
+@group(0) @binding(0) var<storage, read_write> x:         array<f32>;
+@group(0) @binding(1) var<storage, read_write> out:       array<f32>;
+@group(0) @binding(2) var<uniform>             d_uniform: vec4<u32>;
+
+@compute @workgroup_size(64)
+fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
+  let env = gid.x;
+  let n_envs = arrayLength(&out);
+  if (env >= n_envs) { return; }
+  let d = d_uniform.x;
+  var s: f32 = 0.0;
+  for (var i = 0u; i < 64u; i = i + 1u) {
+    if (i >= d) { break; }
+    let v = x[env * d + i];
+    s = s + v * v;
+  }
+  out[env] = s;
+}
+"
+     :bindings [(assoc (wgpu/storage-binding 0 0) :writeback false)
+                (wgpu/storage-binding 1 1)
+                (wgpu/uniform-binding 2 2)]
+     :workgroup-size 64}))
+
+(defn l2-norm-squared-inline
+  "Reference per-env ||x||^2 in pure Clojure."
+  [x d]
+  (let [n-envs (quot (count x) d)]
+    (vec (for [env (range n-envs)]
+           (reduce + (for [i (range d)]
+                       (let [v (nth x (+ (* env d) i))] (* v v))))))))
+
+(defn track-vel-exp-inline
+  "Isaac Lab `track_lin_vel_xy_exp`-style tracking reward (host-side
+  scalar). reward = exp(-||v_target - v_actual||^2 / sigma^2)"
+  [v-target v-actual sigma d]
+  (let [n-envs (quot (count v-target) d)
+        sigma2 (* sigma sigma)]
+    (vec (for [env (range n-envs)]
+           (let [s (reduce + (for [i (range d)]
+                                (let [dv (- (nth v-target (+ (* env d) i))
+                                            (nth v-actual (+ (* env d) i)))]
+                                  (* dv dv))))]
+             (wp/exp (- (/ s sigma2))))))))
+
+(defn combine-weighted-rewards
+  "Compose K per-env reward terms with per-term weights into total per-env
+  reward. Mirror of Isaac Lab's RewardManager.compute(): weighted sum of
+  term values."
+  [term-values weights]
+  (let [n-envs (count (first term-values))]
+    (vec (for [env (range n-envs)]
+           (reduce + (map (fn [term w] (* w (nth term env))) term-values weights))))))
+
+;; ── Episode terminations + truncations (env-parallel) ────────────────────
+;;
+;; Isaac Lab `TerminationManager` canonical pattern. Per-env booleans
+;; (encoded as f32 0.0/1.0) for:
+;;   terminated[env] = joint_limit_violation OR base_fall   (MDP termination)
+;;   truncated[env]  = step_count >= max_steps              (MDP truncation)
+;;
+;; Done = terminated OR truncated -> host triggers reset_env(env).
+;; One thread per env scans q[env*n..env*n+n] for limit violation + checks
+;; base_z + step_count. WGSL loop bound is 32 (MAX_N_TERM in the TS
+;; source); n is a runtime uniform, capped by that compile bound.
+;;
+;; Note on bindings: the TS source's `bindings` array declares only ONE
+;; uniform entry (binding 7, inputIndex 7) even though the :js fn takes 3
+;; trailing scalars (n, minBaseZ, maxSteps at positions 7/8/9) — WGSL packs
+;; all 3 into a single vec4 `params` uniform (.x/.y/.z), but the JS-side
+;; bindings metadata only names the first. Ported verbatim (bindings is
+;; inert JVM-side data here; wgpu-backend's jvm-backend dispatch ignores
+;; :bindings entirely and always runs the :js fn via warp.warp/launch) —
+;; not "fixed", since that would diverge from the TS source this file
+;; mirrors 1:1.
+
+(def terminations-kernel
+  (wgpu/wgpu-kernel
+    {:js (fn [q q-lower q-upper base-z step terminated truncated n min-base-z max-steps]
+           (let [env (wp/tid)
+                 limit-violated (loop [i 0]
+                                  (if (>= i n)
+                                    0
+                                    (let [v (wp/wp-get q (+ (* env n) i))]
+                                      (if (or (< v (wp/wp-get q-lower i))
+                                              (> v (wp/wp-get q-upper i)))
+                                        1
+                                        (recur (inc i))))))
+                 fell      (if (< (wp/wp-get base-z env) min-base-z) 1 0)
+                 timed-out (if (>= (wp/wp-get step env) max-steps) 1 0)]
+             (wp/wp-set terminated env (if (or (pos? limit-violated) (pos? fell)) 1 0))
+             (wp/wp-set truncated env timed-out)))
+     :wgsl "
+@group(0) @binding(0) var<storage, read_write> q:          array<f32>;
+@group(0) @binding(1) var<storage, read_write> q_lower:    array<f32>;
+@group(0) @binding(2) var<storage, read_write> q_upper:    array<f32>;
+@group(0) @binding(3) var<storage, read_write> base_z:     array<f32>;
+@group(0) @binding(4) var<storage, read_write> step:       array<f32>;
+@group(0) @binding(5) var<storage, read_write> terminated: array<f32>;
+@group(0) @binding(6) var<storage, read_write> truncated:  array<f32>;
+@group(0) @binding(7) var<uniform>             params:     vec4<f32>;
+//                                                          .x = n_joints (cast u32)
+//                                                          .y = min_base_z
+//                                                          .z = max_steps
+
+@compute @workgroup_size(64)
+fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
+  let env = gid.x;
+  let n_envs = arrayLength(&terminated);
+  if (env >= n_envs) { return; }
+  let n = u32(params.x);
+  let min_base_z = params.y;
+  let max_steps = params.z;
+
+  var limit_violated: u32 = 0u;
+  for (var i = 0u; i < 32u; i = i + 1u) {
+    if (i >= n) { break; }
+    let v = q[env * n + i];
+    if (v < q_lower[i] || v > q_upper[i]) {
+      limit_violated = 1u;
+      break;
+    }
+  }
+  let fell = select(0u, 1u, base_z[env] < min_base_z);
+  let timed_out = select(0u, 1u, step[env] >= max_steps);
+  terminated[env] = select(0.0, 1.0, (limit_violated | fell) != 0u);
+  truncated[env] = select(0.0, 1.0, timed_out != 0u);
+}
+"
+     :bindings [(assoc (wgpu/storage-binding 0 0) :writeback false)
+                (assoc (wgpu/storage-binding 1 1) :writeback false)
+                (assoc (wgpu/storage-binding 2 2) :writeback false)
+                (assoc (wgpu/storage-binding 3 3) :writeback false)
+                (assoc (wgpu/storage-binding 4 4) :writeback false)
+                (wgpu/storage-binding 5 5)
+                (wgpu/storage-binding 6 6)
+                (wgpu/uniform-binding 7 7)]
+     :workgroup-size 64}))
+
+(defn terminations-inline
+  "Reference terminations + truncations per env. Returns
+  {:terminated [...] :truncated [...]} (the TS source returns an analogous
+  {terminated, truncated} object)."
+  [q q-lower q-upper base-z step n min-base-z max-steps]
+  (let [n-envs (count base-z)]
+    {:terminated (vec (for [env (range n-envs)]
+                         (let [limit-violated (loop [i 0]
+                                                 (if (>= i n)
+                                                   0
+                                                   (let [v (nth q (+ (* env n) i))]
+                                                     (if (or (< v (nth q-lower i))
+                                                             (> v (nth q-upper i)))
+                                                       1
+                                                       (recur (inc i))))))
+                               fell (if (< (nth base-z env) min-base-z) 1 0)]
+                           (if (or (pos? limit-violated) (pos? fell)) 1 0))))
+     :truncated (vec (for [env (range n-envs)]
+                        (if (>= (nth step env) max-steps) 1 0)))}))
