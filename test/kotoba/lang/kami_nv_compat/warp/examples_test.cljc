@@ -1,7 +1,8 @@
 (ns kotoba.lang.kami-nv-compat.warp.examples-test
-  "Coverage for warp.examples wave 1 (damping-kernel, pendulum-step-kernel,
-  cartpole-step-kernel). Each kernel is exercised via warp.warp/launch,
-  matching how a real caller would dispatch the sync/CPU-fallback path."
+  "Coverage for warp.examples waves 1-2 (damping-kernel, pendulum-step-kernel,
+  cartpole-step-kernel, two-link-arm-step-kernel). Each kernel is exercised
+  via warp.warp/launch, matching how a real caller would dispatch the
+  sync/CPU-fallback path."
   (:require [clojure.test :refer [deftest is testing]]
             [kotoba.lang.kami-nv-compat.warp.examples :as ex]
             [kotoba.lang.kami-nv-compat.warp.warp :as wp]))
@@ -80,3 +81,55 @@
                               :inputs [x x-dot theta theta-dot force 0.02 9.8 1.0 0.1 0.5]})
                   (first @theta-dot)))]
       (is (close? (run 0.05) (- (run -0.05)) 1e-12)))))
+
+;; ── two-link-arm-step-kernel ──────────────────────────────────────────────
+
+(def two-link-arm-params
+  "m1 L1 r1 I1 m2 L2 r2 I2 — a concrete, non-degenerate parameter set (both
+  links contribute mass/inertia so det(M) is never zero)."
+  [1.0 1.0 0.5 0.1 1.0 1.0 0.5 0.1])
+
+(defn- run-two-link-arm [q1 q2 dq1 dq2 t1 t2 dt]
+  (let [theta1 (wp/wp-array [q1]) theta1-dot (wp/wp-array [dq1])
+        theta2 (wp/wp-array [q2]) theta2-dot (wp/wp-array [dq2])
+        tau1   (wp/wp-array [t1]) tau2       (wp/wp-array [t2])]
+    (wp/launch {:kernel-fn (:fn ex/two-link-arm-step-kernel) :dim 1
+                :inputs (into [theta1 theta1-dot theta2 theta2-dot tau1 tau2 dt 9.8]
+                               two-link-arm-params)})
+    {:theta1 (first @theta1) :theta1-dot (first @theta1-dot)
+     :theta2 (first @theta2) :theta2-dot (first @theta2-dot)}))
+
+(deftest two-link-arm-step-rest-at-zero-is-equilibrium
+  (testing "q1=q2=0, zero velocity, zero torque -> both gravity terms vanish
+            (sin(0)=0), stays at rest exactly"
+    (let [r (run-two-link-arm 0.0 0.0 0.0 0.0 0.0 0.0 0.001)]
+      (is (= 0.0 (:theta1 r)))
+      (is (= 0.0 (:theta1-dot r)))
+      (is (= 0.0 (:theta2 r)))
+      (is (= 0.0 (:theta2-dot r))))))
+
+(deftest two-link-arm-step-matches-independent-hand-derivation
+  (testing "q1=0.1, q2=0, at rest, no torque: cross-checked against a raw
+            (non-kernel) re-derivation of the same closed-form 2x2 solve"
+    (let [m1 1.0 L1 1.0 r1 0.5 I1 0.1
+          m2 1.0 r2 0.5 I2 0.1
+          g 9.8 q1 0.1 q2 0.0 dt 0.001
+          a (+ (* m1 r1 r1) I1 (* m2 L1 L1))
+          b (+ (* m2 r2 r2) I2)
+          c (* m2 L1 r2)
+          cos-t2 (Math/cos q2)
+          m11 (+ a b (* 2 c cos-t2)) m12 (+ b (* c cos-t2)) m22 b
+          h1 (+ (* m1 g r1 (Math/sin q1)) (* m2 g (+ (* L1 (Math/sin q1)) (* r2 (Math/sin (+ q1 q2))))))
+          h2 (* m2 g r2 (Math/sin (+ q1 q2)))
+          det (- (* m11 m22) (* m12 m12))
+          ddq1 (/ (- (* m22 (- h1)) (* m12 (- h2))) det)
+          ddq2 (/ (- (* m11 (- h2)) (* m12 (- h1))) det)
+          r (run-two-link-arm q1 q2 0.0 0.0 0.0 0.0 dt)]
+      (is (close? (:theta1-dot r) (* dt ddq1) 1e-12))
+      (is (close? (:theta2-dot r) (* dt ddq2) 1e-12)))))
+
+(deftest two-link-arm-step-registers-correct-bindings
+  (is (= 10 (count (:bindings ex/two-link-arm-step-kernel))))
+  (is (every? false? (map :writeback (filter #(= (:kind %) :storage)
+                                              (drop 4 (take 6 (:bindings ex/two-link-arm-step-kernel)))))))
+  (is (= 64 (:workgroup-size ex/two-link-arm-step-kernel))))
