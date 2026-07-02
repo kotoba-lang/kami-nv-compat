@@ -231,7 +231,7 @@
                    (let [fi (aget nodes (+ base 3))
                          [nb nt] (trace-leaf soup tri-idx fi cnt ro rd best best-t)]
                      (recur (dec sp) nb nt))
-                   (let [left (aget nodes (+ base 3))
+                   (let [left (int (aget nodes (+ base 3)))
                          right (int (- (aget nodes (+ base 7))))]
                      (aset stack (dec sp) left)
                      (aset stack sp right)

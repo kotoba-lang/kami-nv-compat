@@ -1,6 +1,6 @@
 (ns kotoba.lang.kami-nv-compat.kami-rt.bvh-test
   "kami-rt.bvh: triangle-soup / BVH build / ray-triangle intersection coverage."
-  (:require [clojure.test :refer [deftest is]]
+  (:require [clojure.test :refer [deftest is testing]]
             [kotoba.lang.kami-nv-compat.kami-rt.bvh :as bvh]))
 
 (def one-tri
@@ -16,6 +16,14 @@
 ;; exact grazing boundary (inherent BVH behavior, not what these tests probe).
 (def tilted-tri
   [[[0.0 0.0 0.0] [1.0 0.0 0.0] [0.0 1.0 1.0]]])
+
+;; Three tilted, well-separated triangles: span > 2 forces build-node! to
+;; recurse into internal nodes (not a single leaf), so trace-closest must
+;; walk the left/right-child stack-push branch, not just the leaf branch.
+(def tilted-three-tris
+  [[[0.0 0.0 0.0] [1.0 0.0 0.0] [0.0 1.0 1.0]]
+   [[3.0 0.0 0.0] [4.0 0.0 0.0] [3.0 1.0 1.0]]
+   [[6.0 0.0 0.0] [7.0 0.0 0.0] [6.0 1.0 1.0]]])
 
 (deftest triangle-soup-shape
   (let [soup (bvh/triangle-soup one-tri)]
@@ -46,6 +54,20 @@
     (is (some? hit))
     (is (= 0 (:tri hit)))
     (is (< (Math/abs (- 4.8 (:t hit))) 1e-9))))
+
+(deftest trace-closest-multi-triangle-internal-node-traversal
+  (testing "regression: aset on a double-array value into the int-array stack (left child)
+  was uncoerced — every prior test's BVH had node-count 1 (a trivial leaf root), so this
+  branch was never exercised until a real multi-triangle scene forced it"
+    (let [soup (bvh/triangle-soup tilted-three-tris)
+          b (bvh/build-bvh soup)
+          hit0 (bvh/trace-closest soup b [0.2 0.2 5.0] [0.0 0.0 -1.0])
+          hit1 (bvh/trace-closest soup b [3.2 0.2 5.0] [0.0 0.0 -1.0])
+          hit2 (bvh/trace-closest soup b [6.2 0.2 5.0] [0.0 0.0 -1.0])]
+      (is (> (:node-count b) 1))
+      (is (= 0 (:tri hit0)))
+      (is (= 1 (:tri hit1)))
+      (is (= 2 (:tri hit2))))))
 
 (deftest trace-closest-miss
   (let [soup (bvh/triangle-soup tilted-tri)
