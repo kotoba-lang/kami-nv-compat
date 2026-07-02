@@ -61,46 +61,54 @@
 
 (defn- solve-dls
   "Δq = J^T (J J^T + λ²I)^-1 error. J is a 6×n vector-of-vectors; returns a
-  length-n delta. Uses a mutable double[][] augmented matrix (Gauss-Jordan)."
+  length-n delta. Gauss-Jordan elimination with partial pivoting on a plain
+  6×7 vector-of-vectors augmented matrix (no primitive arrays — portable to
+  cljs; a 6×7 solve is far too small to need mutable-array performance)."
   [J error lam n]
   (let [lam2 (* lam lam)
-        ^"[[D" aug (make-array Double/TYPE 6 7)]
-    ;; 1. A = J J^T + λ²I, augmented with error.
-    (dotimes [i 6]
-      (dotimes [j 6]
-        (let [s (loop [k 0 acc 0.0]
-                  (if (>= k n) acc
-                    (recur (inc k) (+ acc (* (double (get-in J [i k]))
-                                             (double (get-in J [j k])))))))]
-          (aset ^"[[D" aug i j (double (+ s (if (= i j) lam2 0))))))
-      (aset ^"[[D" aug i 6 (double (nth error i))))
-    ;; 2. Gauss-Jordan elimination on the 6×7 augmented matrix.
-    (dotimes [col 6]
-      (let [piv (loop [r (inc col) p col mx (Math/abs (aget ^"[[D" aug col col))]
-                  (if (>= r 6) p
-                    (let [v (Math/abs (aget ^"[[D" aug r col))]
-                      (if (> v mx) (recur (inc r) r v) (recur (inc r) p mx)))))
-            mx  (Math/abs (aget ^"[[D" aug piv col))]
-        (when (>= mx 1e-18)
-          (when (not= piv col)
-            (let [tmp (aget ^"[[D" aug col)]
-              (aset ^"[[D" aug col (aget ^"[[D" aug piv))
-              (aset ^"[[D" aug piv tmp)))
-          (let [pv (aget ^"[[D" aug col col)]
-            (dotimes [j 7] (aset ^"[[D" aug col j (/ (aget ^"[[D" aug col j) pv))))
-          (dotimes [r 6]
-            (when (not= r col)
-              (let [f (aget ^"[[D" aug r col)]
-                (when (>= (Math/abs f) 1e-18)
-                  (dotimes [j 7]
-                    (aset ^"[[D" aug r j (- (aget ^"[[D" aug r j)
-                                            (* f (aget ^"[[D" aug col j))))))))))))
-    ;; 3. y = column 6; Δq = J^T y.
-    (let [y (double-array (for [i (range 6)] (aget ^"[[D" aug i 6)))]
-      (vec (for [k (range n)]
-             (loop [i 0 acc 0.0]
-               (if (>= i 6) acc
-                 (recur (inc i) (+ acc (* (double (get-in J [i k])) (aget y i)))))))))))
+        row  (fn [i]
+               (conj (vec (for [j (range 6)]
+                            (let [s (loop [k 0 acc 0.0]
+                                      (if (>= k n) acc
+                                        (recur (inc k) (+ acc (* (double (get-in J [i k]))
+                                                                 (double (get-in J [j k])))))))]
+                              (double (+ s (if (= i j) lam2 0))))))
+                     (double (nth error i))))
+        ;; 1. A = J J^T + λ²I, augmented with error.
+        aug0 (vec (for [i (range 6)] (row i)))
+        ;; 2. Gauss-Jordan elimination on the 6×7 augmented matrix.
+        aug  (reduce
+               (fn [aug col]
+                 (let [piv (reduce (fn [p r]
+                                      (if (> (Math/abs (double (get-in aug [r col])))
+                                             (Math/abs (double (get-in aug [p col]))))
+                                        r p))
+                                    col (range (inc col) 6))
+                       mx  (Math/abs (double (get-in aug [piv col])))]
+                   (if (< mx 1e-18)
+                     aug
+                     (let [aug (if (not= piv col)
+                                 (let [rc (nth aug col) rp (nth aug piv)]
+                                   (-> aug (assoc col rp) (assoc piv rc)))
+                                 aug)
+                           pv  (get-in aug [col col])
+                           aug (assoc aug col (mapv #(/ % pv) (nth aug col)))]
+                       (reduce
+                         (fn [aug r]
+                           (if (= r col)
+                             aug
+                             (let [f (double (get-in aug [r col]))]
+                               (if (< (Math/abs f) 1e-18)
+                                 aug
+                                 (assoc aug r (mapv #(- %1 (* f %2)) (nth aug r) (nth aug col)))))))
+                         aug (range 6))))))
+               aug0 (range 6))
+        ;; 3. y = column 6; Δq = J^T y.
+        y (mapv #(get-in aug [% 6]) (range 6))]
+    (vec (for [k (range n)]
+           (loop [i 0 acc 0.0]
+             (if (>= i 6) acc
+               (recur (inc i) (+ acc (* (double (get-in J [i k])) (nth y i))))))))))
 
 ;; ── Controller ────────────────────────────────────────────────────────────
 

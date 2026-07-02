@@ -26,7 +26,7 @@
       (is (close-to? (nth out 0) (Math/tanh 0.7) 1e-6))
       (is (close-to? (nth out 1) (Math/tanh 0.4) 1e-6))))
   (testing "throws when obs length is not a multiple of obs_dim"
-    (is (thrown-with-msg? clojure.lang.ExceptionInfo #"multiple"
+    (is (thrown-with-msg? #?(:clj clojure.lang.ExceptionInfo :cljs cljs.core/ExceptionInfo) #"multiple"
                           (p/run-mlp-policy spec [0.3])))))
 
 (deftest mlp-serialize-load-random
@@ -43,9 +43,9 @@
       (is (not= (:W1_flat a) (:W1_flat (p/make-random-mlp-spec 4 8 2 999)))))) ; different seed
   (testing "load validates the (snake_case) JSON fields"
     (let [parsed (json/read-str (p/serialize-mlp-to-json spec) :key-fn keyword)]
-      (is (thrown-with-msg? clojure.lang.ExceptionInfo #"W1_flat"
+      (is (thrown-with-msg? #?(:clj clojure.lang.ExceptionInfo :cljs cljs.core/ExceptionInfo) #"W1_flat"
                             (p/load-mlp-from-json (assoc parsed :W1_flat [1 2 3])))) ; wrong length
-      (is (thrown-with-msg? clojure.lang.ExceptionInfo #"obs_dim"
+      (is (thrown-with-msg? #?(:clj clojure.lang.ExceptionInfo :cljs cljs.core/ExceptionInfo) #"obs_dim"
                             (p/load-mlp-from-json (dissoc parsed :obs_dim))))       ; missing
-      (is (thrown-with-msg? clojure.lang.ExceptionInfo #"mlp_policy"
+      (is (thrown-with-msg? #?(:clj clojure.lang.ExceptionInfo :cljs cljs.core/ExceptionInfo) #"mlp_policy"
                             (p/load-mlp-from-json (assoc parsed :type "nope"))))))) ; bad type

@@ -99,7 +99,8 @@
 
       (shutdown-all [_]
         (let [order (try (topological-order (:extensions @state))
-                         (catch Exception _ (vec (keys (:extensions @state)))))
+                         (catch #?(:clj Exception :cljs :default) _
+                           (vec (keys (:extensions @state)))))
               log   (atom [])]
           (doseq [eid (reverse order)]
             (let [ext (get-in @state [:extensions eid])]

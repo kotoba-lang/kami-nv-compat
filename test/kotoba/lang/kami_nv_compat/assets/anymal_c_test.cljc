@@ -19,4 +19,4 @@
       (is (= [0 3 6 9]  ((:haa-indices a))))
       (is (= [1 4 7 10] ((:hfe-indices a))))
       (is (= [2 5 8 11] ((:kfe-indices a))))
-      (is (thrown? clojure.lang.ExceptionInfo ((:leg-indices a) "XX"))))))
+      (is (thrown? #?(:clj clojure.lang.ExceptionInfo :cljs cljs.core/ExceptionInfo) ((:leg-indices a) "XX"))))))

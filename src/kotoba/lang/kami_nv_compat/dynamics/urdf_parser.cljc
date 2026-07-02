@@ -17,7 +17,7 @@
 (defn- extract-attr [text re]
   (when-let [m (re-find re text)] (nth m 1)))
 
-(defn- parse-num [s] (Double/parseDouble s))
+(defn- parse-num [s] #?(:clj (Double/parseDouble s) :cljs (js/parseFloat s)))
 
 (defn- extract-triplet
   ([text attr-re]

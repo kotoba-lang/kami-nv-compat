@@ -16,7 +16,7 @@
       (is (= 6 (count @seen)))
       (is (= (range 6) @seen))))
   (testing "tid throws outside launch"
-    (is (thrown? clojure.lang.ExceptionInfo (w/tid)))))
+    (is (thrown? #?(:clj clojure.lang.ExceptionInfo :cljs cljs.core/ExceptionInfo) (w/tid)))))
 
 (deftest vec3-math
   (is (= [3 5 7] (w/vec3-add [1 2 3] [2 3 4])))

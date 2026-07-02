@@ -41,10 +41,10 @@
 
 (deftest parse-urdf-validation
   (testing "unknown joint kind throws"
-    (is (thrown? clojure.lang.ExceptionInfo
+    (is (thrown? #?(:clj clojure.lang.ExceptionInfo :cljs cljs.core/ExceptionInfo)
                  (up/parse-urdf "<robot name=\"r\"><joint name=\"j\" type=\"teleport\"><parent link=\"a\"/><child link=\"b\"/></joint></robot>"))))
   (testing "missing <parent> throws"
-    (is (thrown? clojure.lang.ExceptionInfo
+    (is (thrown? #?(:clj clojure.lang.ExceptionInfo :cljs cljs.core/ExceptionInfo)
                  (up/parse-urdf "<robot name=\"r\"><joint name=\"j\" type=\"revolute\"><child link=\"b\"/></joint></robot>"))))
   (testing "no links/joints -> empty vectors, default name"
     (let [sys (up/parse-urdf "<robot></robot>")]

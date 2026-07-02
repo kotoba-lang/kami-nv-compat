@@ -33,9 +33,9 @@
     (let [r (coc/parse-reasoning-record {"clipUuid" "d" "eventCluster" "stop"})]
       (is (= "stop" (:event-cluster r)))))
   (testing "rejects missing uuid / unknown cluster / bad keyframes"
-    (is (thrown? clojure.lang.ExceptionInfo (coc/parse-reasoning-record {})))
-    (is (thrown? clojure.lang.ExceptionInfo (coc/parse-reasoning-record {"clipUuid" "x" "eventCluster" "teleport"})))
-    (is (thrown? clojure.lang.ExceptionInfo (coc/parse-reasoning-record {"clipUuid" "x" "keyframeIndices" 5})))))
+    (is (thrown? #?(:clj clojure.lang.ExceptionInfo :cljs cljs.core/ExceptionInfo) (coc/parse-reasoning-record {})))
+    (is (thrown? #?(:clj clojure.lang.ExceptionInfo :cljs cljs.core/ExceptionInfo) (coc/parse-reasoning-record {"clipUuid" "x" "eventCluster" "teleport"})))
+    (is (thrown? #?(:clj clojure.lang.ExceptionInfo :cljs cljs.core/ExceptionInfo) (coc/parse-reasoning-record {"clipUuid" "x" "keyframeIndices" 5})))))
 
 (deftest record->datoms-test
   (let [trace (-> (coc/causation-builder "nominal")

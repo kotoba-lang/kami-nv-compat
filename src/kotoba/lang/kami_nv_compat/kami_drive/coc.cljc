@@ -15,7 +15,7 @@
     "yield" "lane_change" "stop" "obstacle" "merge"})
 
 (defn- lower-first [s]
-  (if (str/blank? s) s (str (Character/toLowerCase (first s)) (subs s 1))))
+  (if (str/blank? s) s (str (str/lower-case (subs s 0 1)) (subs s 1))))
 
 (defn render-narrative
   "Render a default narrative from `steps` (deterministic; a verbalizer can

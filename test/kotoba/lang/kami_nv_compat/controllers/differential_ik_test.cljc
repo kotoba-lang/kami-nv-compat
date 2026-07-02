@@ -18,7 +18,7 @@
 (deftest spatial->isaaclab-jacobian-swap
   (is (= [[0 0 0] [0 0 1] [0 0 2] [0 1 0] [0 1 1] [0 1 2]]
          (dik/spatial->isaaclab-jacobian [[0 1 0] [0 1 1] [0 1 2] [0 0 0] [0 0 1] [0 0 2]])))
-  (is (thrown? clojure.lang.ExceptionInfo (dik/spatial->isaaclab-jacobian [[1] [2] [3]]))))
+  (is (thrown? #?(:clj clojure.lang.ExceptionInfo :cljs cljs.core/ExceptionInfo) (dik/spatial->isaaclab-jacobian [[1] [2] [3]]))))
 
 (deftest controller-action-dim
   (is (= 7 (dik/action-dim (dik/differential-ik-controller (dik/make-default-differential-ik-cfg)))))
@@ -45,7 +45,7 @@
         (is (close? (nth delta 2) 0.0 1e-9))))))
 
 (deftest controller-validation
-  (is (thrown? clojure.lang.ExceptionInfo (dik/differential-ik-controller (dik/make-default-differential-ik-cfg) 0)))
-  (is (thrown? clojure.lang.ExceptionInfo (dik/differential-ik-controller (dik/make-default-differential-ik-cfg {:command-type "teleport"}))))
+  (is (thrown? #?(:clj clojure.lang.ExceptionInfo :cljs cljs.core/ExceptionInfo) (dik/differential-ik-controller (dik/make-default-differential-ik-cfg) 0)))
+  (is (thrown? #?(:clj clojure.lang.ExceptionInfo :cljs cljs.core/ExceptionInfo) (dik/differential-ik-controller (dik/make-default-differential-ik-cfg {:command-type "teleport"}))))
   (let [c (dik/differential-ik-controller (dik/make-default-differential-ik-cfg))]
-    (is (thrown? clojure.lang.ExceptionInfo (dik/set-command! c [1 2 3] {})))))   ; wrong length for pose (7)
+    (is (thrown? #?(:clj clojure.lang.ExceptionInfo :cljs cljs.core/ExceptionInfo) (dik/set-command! c [1 2 3] {})))))   ; wrong length for pose (7)

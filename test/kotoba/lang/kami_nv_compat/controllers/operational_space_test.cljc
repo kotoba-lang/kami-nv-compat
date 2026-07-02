@@ -48,7 +48,7 @@
         (is (close? (nth tau 0) 9.8 1e-9))))))
 
 (deftest validation
-  (is (thrown? clojure.lang.ExceptionInfo (osc/operational-space-controller (osc/make-default-osc-cfg) 0)))
-  (is (thrown? clojure.lang.ExceptionInfo (osc/operational-space-controller (osc/make-default-osc-cfg {:impedance-mode "springy"}))))
+  (is (thrown? #?(:clj clojure.lang.ExceptionInfo :cljs cljs.core/ExceptionInfo) (osc/operational-space-controller (osc/make-default-osc-cfg) 0)))
+  (is (thrown? #?(:clj clojure.lang.ExceptionInfo :cljs cljs.core/ExceptionInfo) (osc/operational-space-controller (osc/make-default-osc-cfg {:impedance-mode "springy"}))))
   (let [c (osc/operational-space-controller (osc/make-default-osc-cfg))]
-    (is (thrown? clojure.lang.ExceptionInfo (osc/set-command! c [1 2 3] {})))))   ; wrong length (expected 7)
+    (is (thrown? #?(:clj clojure.lang.ExceptionInfo :cljs cljs.core/ExceptionInfo) (osc/set-command! c [1 2 3] {})))))   ; wrong length (expected 7)

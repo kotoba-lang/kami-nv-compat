@@ -6,21 +6,28 @@
             [kotoba.lang.kami-nv-compat.actions.action-term :as at]))
 
 (defn mock-env
-  "Mock env for testing. Buffers: :applied-torques atom."
+  "Mock env for testing. Buffers: :applied-torques atom (write-effort! reads
+  it via keyword-invoke, which needs ILookup — valAt on JVM, -lookup on cljs)."
   ([joint-pos joint-vel jacobian ee-pose]
    (mock-env joint-pos joint-vel jacobian ee-pose [[0 0 0] [0 0 0]]))
   ([joint-pos joint-vel jacobian ee-pose ee-vel]
-   (reify
-     ae/IArticulatedEnv
-     (joint-positions [_] joint-pos)
-     (joint-velocities [_] joint-vel)
-     (get-jacobian [_ _body] jacobian)
-     (get-ee-pose [_ _body] ee-pose)
-     (get-ee-velocity [_ _body] ee-vel)
-     (get-gravity-torque [_ _body] [0 0 0])
-     clojure.lang.ILookup
-     (valAt [_ k] (case k :applied-torques (atom [0 0 0]) nil))
-     (valAt [_ k nf] (case k :applied-torques (atom [0 0 0]) nf)))))
+   (let [applied-torques (atom [0 0 0])]
+     (reify
+       ae/IArticulatedEnv
+       (joint-positions [_] joint-pos)
+       (joint-velocities [_] joint-vel)
+       (get-jacobian [_ _body] jacobian)
+       (get-ee-pose [_ _body] ee-pose)
+       (get-ee-velocity [_ _body] ee-vel)
+       (get-gravity-torque [_ _body] [0 0 0])
+       #?@(:clj
+           [clojure.lang.ILookup
+            (valAt [_ k] (case k :applied-torques applied-torques nil))
+            (valAt [_ k nf] (case k :applied-torques applied-torques nf))]
+           :cljs
+           [ILookup
+            (-lookup [_ k] (case k :applied-torques applied-torques nil))
+            (-lookup [_ k nf] (case k :applied-torques applied-torques nf))])))))
 
 (deftest binary-joint-position
   (testing "close when action >= threshold"
@@ -48,9 +55,9 @@
       (is (= [10.0 10.0] @(:wheel-target m))))))
 
 (deftest action-validation
-  (is (thrown? clojure.lang.ExceptionInfo
+  (is (thrown? #?(:clj clojure.lang.ExceptionInfo :cljs cljs.core/ExceptionInfo)
                (tsa/make-binary-joint-position-action
                  {:joint-names [0 1] :open-command [0] :close-command [0 0]})))
-  (is (thrown? clojure.lang.ExceptionInfo
+  (is (thrown? #?(:clj clojure.lang.ExceptionInfo :cljs cljs.core/ExceptionInfo)
                (tsa/make-non-holonomic-action
                  {:joint-names [0] :wheel-radius 0.1 :wheel-separation 0.4}))))
