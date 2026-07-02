@@ -17,17 +17,17 @@ this package as an external dependency instead of vendoring it under `src/`.
 Canonical KAMI engines this facade mirrors (`amenominaka`, `e7m-sim`,
 `e7m-shugyo`, `hikari-rt`/`kami-rt`, `kami-rtx`, `utsushimi`, `wadachi-sim`,
 `murakumo-render`, `kotoba-datomic-nucleus`, `michibiki`/`kami-drive`) are
-implemented in-tree here (TypeScript + WGSL); the longer-term plan is to back
-them with the Rust crates under the sibling `kotoba-lang/kami-engine` repo
-(`kami-genesis`, `kami-articulated`, `kami-rt`, `kami-usd`, …) once those land
-past path-reservation — see ADR-2605261800 §D6/§D7.
+implemented in-tree here (portable `.cljc` + WGSL, per the kotoba-lang layer
+test — see ADR-2607020130); the longer-term plan is to back them with the
+Rust crates under the sibling `kotoba-lang/kami-engine` repo (`kami-genesis`,
+`kami-articulated`, `kami-rt`, `kami-usd`, …) once those land past
+path-reservation — see ADR-2605261800 §D6/§D7.
 
 ## Development
 
 ```bash
-pnpm install   # or npm install
-pnpm run build
-pnpm test
+clojure -M:lint   # clj-kondo
+clojure -M:test   # cognitect test-runner
 ```
 
 ## License
