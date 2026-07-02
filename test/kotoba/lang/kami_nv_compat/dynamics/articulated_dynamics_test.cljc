@@ -89,7 +89,7 @@
       (is (empty? (:joint-names b))))))
 
 (deftest build-articulation-base-validation
-  (is (thrown? clojure.lang.ExceptionInfo
+  (is (thrown? #?(:clj clojure.lang.ExceptionInfo :cljs cljs.core/ExceptionInfo)
                (ad/build-articulation {:name "x" :links [] :joints []}))))   ; zero base links
 
 (deftest make-zero-state-test
@@ -122,7 +122,7 @@
       (is (< (Math/abs (- (get-in J [5 0]) 0.0)) 1e-12))))  ; linear z (dp=0 -> 0)
   (testing "target-joint-idx out of range throws"
     (let [b (ad/build-articulation one-joint-sys)]
-      (is (thrown? clojure.lang.ExceptionInfo (ad/geometric-jacobian b [0] 5))))))
+      (is (thrown? #?(:clj clojure.lang.ExceptionInfo :cljs cljs.core/ExceptionInfo) (ad/geometric-jacobian b [0] 5))))))
 
 (def pendulum-sys
   {:name "p"

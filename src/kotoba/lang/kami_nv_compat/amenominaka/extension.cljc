@@ -10,7 +10,7 @@
   ids 'omni.usd'); the convenience ExtensionToml map exposes the common
   [package] fields directly.
 
-  JVM (.clj): pure data + parsing, no platform seam."
+  Pure data + parsing, no platform seam — portable JVM/cljs."
   (:require [clojure.string :as str]))
 
 ;; ── IExt lifecycle (mirrors omni.ext.IExt) ────────────────────────────────
@@ -35,15 +35,15 @@
   double-quoted string. (An unescaped `\"` toggles in-string.)"
   [line]
   (let [n (count line)]
-    (loop [i 0 in-string? false out (StringBuilder.)]
+    (loop [i 0 in-string? false out ""]
       (if (>= i n)
-        (.toString out)
+        out
         (let [c    (.charAt line i)
               prev (if (pos? i) (.charAt line (dec i)) \space)
               in-string?' (if (and (= c \") (not= prev \\)) (not in-string?) in-string?)]
           (if (and (= c \#) (not in-string?))
-            (.toString out)
-            (recur (inc i) in-string?' (doto out (.append c)))))))))
+            out
+            (recur (inc i) in-string?' (str out c))))))))
 
 (defn- strip-quotes
   "Trim, then strip one leading + trailing double-quote if both present."
@@ -56,26 +56,28 @@
 (defn- split-top-level
   "Split `inner` on top-level commas, respecting nested [] / {} depth."
   [inner]
-  (loop [chars (seq inner) depth 0 cur (StringBuilder.) out []]
+  (loop [chars (seq inner) depth 0 cur "" out []]
     (if-let [ch (first chars)]
       (cond
-        (or (= ch \[) (= ch \{)) (recur (rest chars) (inc depth) (doto cur (.append ch)) out)
-        (or (= ch \]) (= ch \})) (recur (rest chars) (dec depth) (doto cur (.append ch)) out)
-        (and (= ch \,) (zero? depth)) (recur (rest chars) depth (StringBuilder.) (conj out (.toString cur)))
-        :else (recur (rest chars) depth (doto cur (.append ch)) out))
-      (let [final (.toString cur)]
-        (if (str/blank? final) out (conj out final))))))
+        (or (= ch \[) (= ch \{)) (recur (rest chars) (inc depth) (str cur ch) out)
+        (or (= ch \]) (= ch \})) (recur (rest chars) (dec depth) (str cur ch) out)
+        (and (= ch \,) (zero? depth)) (recur (rest chars) depth "" (conj out cur))
+        :else (recur (rest chars) depth (str cur ch) out))
+      (if (str/blank? cur) out (conj out cur)))))
 
 (declare parse-value)
 
 (defn- parse-num
   "Parse a TOML scalar number; returns nil if `s` is not a number. Integers
-  (no '.') become long; decimals stay double — matching TS Number()/Math.trunc."
+  (no '.') become long; decimals stay double — matching TS Number()/Math.trunc.
+  (On cljs there is no int/long distinction — every number is a JS double.)"
   [s]
-  (try
-    (let [n (Double/parseDouble s)]
-      (if (str/includes? s ".") n (long n)))
-    (catch Exception _ nil)))
+  #?(:clj  (try
+             (let [n (Double/parseDouble s)]
+               (if (str/includes? s ".") n (long n)))
+             (catch Exception _ nil))
+     :cljs (let [n (js/parseFloat s)]
+             (when-not (js/isNaN n) n))))
 
 (defn- parse-value
   "Parse a TOML scalar / array / inline-table value (string already trimmed)."

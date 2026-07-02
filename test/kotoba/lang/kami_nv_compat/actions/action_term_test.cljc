@@ -29,9 +29,9 @@
     (is (= [0 0] @(:processed-actions (:state m))))))
 
 (deftest action-term-validation
-  (is (thrown? clojure.lang.ExceptionInfo (at/make-action-term-state {:joint-names []})))
+  (is (thrown? #?(:clj clojure.lang.ExceptionInfo :cljs cljs.core/ExceptionInfo) (at/make-action-term-state {:joint-names []})))
   (let [m (mock-term {:joint-names [0 1 2]})]
-    (is (thrown? clojure.lang.ExceptionInfo (at/process-actions! (:term m) [1 2])))))
+    (is (thrown? #?(:clj clojure.lang.ExceptionInfo :cljs cljs.core/ExceptionInfo) (at/process-actions! (:term m) [1 2])))))
 
 (deftest action-manager-compose
   (let [m1 (mock-term {:joint-names [0 1]})
@@ -48,7 +48,7 @@
     (is (= [0 0] @(:raw-actions (:state m1))))))
 
 (deftest action-manager-validation
-  (is (thrown? clojure.lang.ExceptionInfo (at/action-manager [])))
+  (is (thrown? #?(:clj clojure.lang.ExceptionInfo :cljs cljs.core/ExceptionInfo) (at/action-manager [])))
   (let [m (mock-term {:joint-names [0]})
         mgr (at/action-manager [(:term m)])]
-    (is (thrown? clojure.lang.ExceptionInfo (at/manager-process-actions! mgr [1 2])))))
+    (is (thrown? #?(:clj clojure.lang.ExceptionInfo :cljs cljs.core/ExceptionInfo) (at/manager-process-actions! mgr [1 2])))))

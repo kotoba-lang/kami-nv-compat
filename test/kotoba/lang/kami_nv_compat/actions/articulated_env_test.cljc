@@ -22,4 +22,4 @@
       (is (= [[0 5.0 7.0]] @(:actions env))))))
 
 (deftest write-effort-no-buffer
-  (is (thrown? clojure.lang.ExceptionInfo (ae/write-effort! {} [[0 1.0]]))))
+  (is (thrown? #?(:clj clojure.lang.ExceptionInfo :cljs cljs.core/ExceptionInfo) (ae/write-effort! {} [[0 1.0]]))))

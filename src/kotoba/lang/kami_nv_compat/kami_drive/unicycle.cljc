@@ -10,7 +10,7 @@
 
 (defn yaw->mat3
   "Yaw (rad) -> row-major 3×3 rotation about +z."
-  ^clojure.lang.PersistentVector [yaw]
+  [yaw]
   (let [c (Math/cos yaw)
         s (Math/sin yaw)
         neg-s (+ 0.0 (- s))]   ; normalize -0.0 -> 0.0 (Clojure = distinguishes them)

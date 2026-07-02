@@ -28,51 +28,60 @@
 ;; ── Null-space projection (damped pseudoinverse, Gauss-Jordan 6×6) ────────
 
 (defn- project-to-nullspace
-  "Project tauNs into the null-space of J: P_null = I - Jᵀ(JJᵀ+λ²I)⁻¹ J."
+  "Project tauNs into the null-space of J: P_null = I - Jᵀ(JJᵀ+λ²I)⁻¹ J. Gauss-
+  Jordan elimination with partial pivoting on a plain 6×7 vector-of-vectors
+  augmented matrix (no primitive arrays — portable to cljs; a 6×7 solve is far
+  too small to need mutable-array performance)."
   [J tauNs n lam]
   (let [lam2 (* lam lam)
         ;; Jtau = J · tauNs (6-vec)
-        Jtau (double-array (for [k (range 6)]
-                             (loop [i 0 acc 0.0]
-                               (if (>= i n) acc
-                                 (recur (inc i) (+ acc (* (double (get-in J [k i])) (double (nth tauNs i)))))))))
-        ^"[[D" aug (make-array Double/TYPE 6 7)]
-    ;; A = J Jᵀ + λ²I, augmented with Jtau.
-    (dotimes [i 6]
-      (dotimes [j 6]
-        (let [s (loop [k 0 acc 0.0]
-                  (if (>= k n) acc
-                    (recur (inc k) (+ acc (* (double (get-in J [i k])) (double (get-in J [j k])))))))]
-          (aset ^"[[D" aug i j (double (+ s (if (= i j) lam2 0))))))
-      (aset ^"[[D" aug i 6 (aget Jtau i)))
-    ;; Gauss-Jordan.
-    (dotimes [col 6]
-      (let [piv (loop [r (inc col) p col mx (Math/abs (aget ^"[[D" aug col col))]
-                  (if (>= r 6) p
-                    (let [v (Math/abs (aget ^"[[D" aug r col))]
-                      (if (> v mx) (recur (inc r) r v) (recur (inc r) p mx)))))
-            mx  (Math/abs (aget ^"[[D" aug piv col))]
-        (when (>= mx 1e-18)
-          (when (not= piv col)
-            (let [tmp (aget ^"[[D" aug col)]
-              (aset ^"[[D" aug col (aget ^"[[D" aug piv))
-              (aset ^"[[D" aug piv tmp)))
-          (let [pv (aget ^"[[D" aug col col)]
-            (dotimes [j 7] (aset ^"[[D" aug col j (/ (aget ^"[[D" aug col j) pv))))
-          (dotimes [r 6]
-            (when (not= r col)
-              (let [f (aget ^"[[D" aug r col)]
-                (when (>= (Math/abs f) 1e-18)
-                  (dotimes [j 7]
-                    (aset ^"[[D" aug r j (- (aget ^"[[D" aug r j)
-                                            (* f (aget ^"[[D" aug col j))))))))))))
-    ;; Jty = Jᵀ y ; out = tauNs - Jty.
-    (let [y (double-array (for [i (range 6)] (aget ^"[[D" aug i 6)))]
-      (vec (for [i (range n)]
-             (- (double (nth tauNs i))
-                (loop [k 0 acc 0.0]
-                  (if (>= k 6) acc
-                    (recur (inc k) (+ acc (* (double (get-in J [k i])) (aget y k))))))))))))
+        Jtau (vec (for [k (range 6)]
+                    (loop [i 0 acc 0.0]
+                      (if (>= i n) acc
+                        (recur (inc i) (+ acc (* (double (get-in J [k i])) (double (nth tauNs i)))))))))
+        row  (fn [i]
+               (conj (vec (for [j (range 6)]
+                            (let [s (loop [k 0 acc 0.0]
+                                      (if (>= k n) acc
+                                        (recur (inc k) (+ acc (* (double (get-in J [i k])) (double (get-in J [j k])))))))]
+                              (double (+ s (if (= i j) lam2 0))))))
+                     (nth Jtau i)))
+        ;; A = J Jᵀ + λ²I, augmented with Jtau.
+        aug0 (vec (for [i (range 6)] (row i)))
+        ;; Gauss-Jordan.
+        aug  (reduce
+               (fn [aug col]
+                 (let [piv (reduce (fn [p r]
+                                      (if (> (Math/abs (double (get-in aug [r col])))
+                                             (Math/abs (double (get-in aug [p col]))))
+                                        r p))
+                                    col (range (inc col) 6))
+                       mx  (Math/abs (double (get-in aug [piv col])))]
+                   (if (< mx 1e-18)
+                     aug
+                     (let [aug (if (not= piv col)
+                                 (let [rc (nth aug col) rp (nth aug piv)]
+                                   (-> aug (assoc col rp) (assoc piv rc)))
+                                 aug)
+                           pv  (get-in aug [col col])
+                           aug (assoc aug col (mapv #(/ % pv) (nth aug col)))]
+                       (reduce
+                         (fn [aug r]
+                           (if (= r col)
+                             aug
+                             (let [f (double (get-in aug [r col]))]
+                               (if (< (Math/abs f) 1e-18)
+                                 aug
+                                 (assoc aug r (mapv #(- %1 (* f %2)) (nth aug r) (nth aug col)))))))
+                         aug (range 6))))))
+               aug0 (range 6))
+        ;; Jty = Jᵀ y ; out = tauNs - Jty.
+        y (mapv #(get-in aug [% 6]) (range 6))]
+    (vec (for [i (range n)]
+           (- (double (nth tauNs i))
+              (loop [k 0 acc 0.0]
+                (if (>= k 6) acc
+                  (recur (inc k) (+ acc (* (double (get-in J [k i])) (nth y k)))))))))))
 
 ;; ── Controller ────────────────────────────────────────────────────────────
 

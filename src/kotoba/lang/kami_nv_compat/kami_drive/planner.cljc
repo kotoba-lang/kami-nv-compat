@@ -8,8 +8,7 @@
   ADR-2607020130."
   (:require [clojure.string :as str]
             [kotoba.lang.kami-nv-compat.kami-drive.coc :as coc]
-            [kotoba.lang.kami-nv-compat.kami-drive.unicycle :as u])
-  (:import (java.util Locale)))
+            [kotoba.lang.kami-nv-compat.kami-drive.unicycle :as u]))
 
 (def default-planner
   "Default planner config (Alpamayo: 6.4 s horizon at 10 Hz = 64 waypoints)."
@@ -44,7 +43,11 @@
 (defn- label-kind [k]
   (condp = k "pedestrian" "Pedestrian" "cyclist" "Cyclist" "vehicle" "Vehicle" "Object"))
 
-(defn- fmt [fmt-str x] (String/format Locale/US fmt-str (to-array [(double x)])))
+(defn- fmt
+  "Fixed-decimal string, e.g. (fmt 1.5 1) => \"1.5\"."
+  [x decimals]
+  #?(:clj  (String/format java.util.Locale/US (str "%." decimals "f") (to-array [(double x)]))
+     :cljs (.toFixed (double x) decimals)))
 
 ;; ── yield reasoning ───────────────────────────────────────────────────────
 
@@ -72,7 +75,7 @@
                 (if (< allowed (:target-speed decision))
                   {:target-speed allowed :agent a :gap gap}
                   decision))))))
-      {:target-speed max-speed :agent nil :gap Double/POSITIVE_INFINITY}
+      {:target-speed max-speed :agent nil :gap #?(:clj Double/POSITIVE_INFINITY :cljs js/Infinity)}
       (:agents obs))))
 
 ;; ── plan ──────────────────────────────────────────────────────────────────
@@ -104,12 +107,12 @@
        "turn_left"  (do (swap! st assoc :target-curvature (:turn-curvature cfg) :cluster "intersection")
                         (add! "Navigation command is turn-left"
                               "the ego is approaching a left turn"
-                              (str "steer left at curvature " (fmt "%.3f" (:turn-curvature cfg)) " /m")
+                              (str "steer left at curvature " (fmt (:turn-curvature cfg) 3) " /m")
                               0))
        "turn_right" (do (swap! st assoc :target-curvature (- (:turn-curvature cfg)) :cluster "intersection")
                         (add! "Navigation command is turn-right"
                               "the ego is approaching a right turn"
-                              (str "steer right at curvature " (fmt "%.3f" (:turn-curvature cfg)) " /m")
+                              (str "steer right at curvature " (fmt (:turn-curvature cfg) 3) " /m")
                               0))
        nil)
 
@@ -129,16 +132,16 @@
                vru? (or (= (:kind a) "pedestrian") (= (:kind a) "cyclist"))
                kf (min steps (max 1 (long (Math/round (double (* (/ (:x a) (max 0.1 (:speed (:ego obs)))) (:hz cfg)))))))]
            (swap! st assoc :target-speed (:target-speed yld) :cluster (if vru? "vru_interaction" "yield"))
-           (add! (str (label-kind (:kind a)) " " (fmt "%.1f" (:x a)) " m ahead within the ego corridor")
+           (add! (str (label-kind (:kind a)) " " (fmt (:x a) 1) " m ahead within the ego corridor")
                  (if vru? "must yield to a vulnerable road user" "must keep a safe following gap")
                  (if (zero? (:target-speed yld))
                    "decelerate to a stop"
-                   (str "reduce speed to " (fmt "%.1f" (:target-speed yld)) " m/s"))
+                   (str "reduce speed to " (fmt (:target-speed yld) 1) " m/s"))
                  kf))
          (when (and (pos? steps) (= command "keep_lane") (not @added?))
            (add! "Lane is clear ahead"
                  "nominal cruising conditions hold"
-                 (str "maintain target speed " (fmt "%.1f" (:target-speed @st)) " m/s")
+                 (str "maintain target speed " (fmt (:target-speed @st) 1) " m/s")
                  0))))
 
      ;; ── action sequence: P-control toward target speed + curvature ──
