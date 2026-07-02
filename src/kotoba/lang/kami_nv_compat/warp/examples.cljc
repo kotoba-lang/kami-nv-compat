@@ -14,11 +14,12 @@
   tid/wp-get/wp-set/sin/cos, with the exact same positional argument order
   (which the :bindings' :input-index fields also key off).
 
-  Wave 45 of ADR-2607020130 (part 1 of N — this is a large file, ~2500 LOC /
-  34 exports across 16 WgpuKernels + 18 CPU-reference \"Inline\" functions;
-  ported across multiple waves rather than one pass). This wave: the 3
-  self-contained physics-step kernels (damping, pendulum, cartpole) that
-  have no separate \"Inline\" companion function.
+  Ported across multiple waves rather than one pass (~2500 LOC / 34 exports
+  across 16 WgpuKernels + 18 CPU-reference \"Inline\" functions). Wave 45:
+  the 3 self-contained physics-step kernels (damping, pendulum, cartpole)
+  with no \"Inline\" companion. Wave 46: two-link-arm-step-kernel — a
+  closed-form 2-DoF planar arm (M(q)*q_ddot + C*q_dot + g(q) = tau, 2x2
+  matrix inverse by hand); also no \"Inline\" companion.
 
   Note: cartpole-step-kernel's semi-implicit-Euler integration order
   (compute the NEW velocity, then integrate position using that NEW
@@ -226,6 +227,121 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
                 (wgpu/storage-binding 3 3)
                 (assoc (wgpu/storage-binding 4 4) :writeback false)
                 (wgpu/uniform-binding 5 5)
+                (wgpu/uniform-binding 6 6)
+                (wgpu/uniform-binding 7 7)
+                (wgpu/uniform-binding 8 8)
+                (wgpu/uniform-binding 9 9)]
+     :workgroup-size 64}))
+
+;; ── Two-link arm step (env-parallel) ──────────────────────────────────────
+;;
+;; Closed-form 2-DoF planar arm dynamics — both joints revolute about world
+;; Y-axis, both links pendulum-like (gravity pulls toward -Z). Standard
+;; manipulator equation M(q)*q_ddot + C(q,q_dot)*q_dot + g(q) = tau, inverted
+;; by hand (2x2 closed form). Reference: Spong, Robot Modeling & Control,
+;; Ch. 7. link1/link2 = [m L r I] (mass, full length, COM offset from joint,
+;; inertia about COM); link2's L is unused here (reserved for future
+;; tip-frame variants — matches TS's `void L2`, so l2-mass/-r2/-I2 are read
+;; but l2-len is simply never bound to a let).
+;;
+;; Bindings (10 total): theta1, theta1_dot, theta2, theta2_dot (storage
+;; read_write), tau1, tau2 (storage read, writeback false), dt, gravity
+;; (uniform), link1, link2 (uniform vec4: m, L, r, I).
+
+(def two-link-arm-step-kernel
+  (wgpu/wgpu-kernel
+    {:js (fn [theta1 theta1-dot theta2 theta2-dot tau1 tau2 dt g
+              m1 l1 r1 i1 m2 _l2 r2 i2]
+           (let [idx    (wp/tid)
+                 q1     (wp/wp-get theta1 idx)
+                 q2     (wp/wp-get theta2 idx)
+                 dq1    (wp/wp-get theta1-dot idx)
+                 dq2    (wp/wp-get theta2-dot idx)
+                 t1     (wp/wp-get tau1 idx)
+                 t2     (wp/wp-get tau2 idx)
+                 a      (+ (* m1 r1 r1) i1 (* m2 l1 l1))
+                 b      (+ (* m2 r2 r2) i2)
+                 c      (* m2 l1 r2)
+                 cos-t2 (wp/cos q2)
+                 sin-t2 (wp/sin q2)
+                 m11    (+ a b (* 2 c cos-t2))
+                 m12    (+ b (* c cos-t2))
+                 m22    b
+                 h1     (+ (- (* c sin-t2 dq2 dq1))
+                           (- (* c sin-t2 (+ dq1 dq2) dq2))
+                           (* m1 g r1 (wp/sin q1))
+                           (* m2 g (+ (* l1 (wp/sin q1)) (* r2 (wp/sin (+ q1 q2))))))
+                 h2     (+ (* c sin-t2 dq1 dq1) (* m2 g r2 (wp/sin (+ q1 q2))))
+                 b1     (- t1 h1)
+                 b2     (- t2 h2)
+                 det    (- (* m11 m22) (* m12 m12))
+                 ddq1   (/ (- (* m22 b1) (* m12 b2)) det)
+                 ddq2   (/ (- (* m11 b2) (* m12 b1)) det)
+                 dq1-new (+ dq1 (* dt ddq1))
+                 dq2-new (+ dq2 (* dt ddq2))]
+             (wp/wp-set theta1-dot idx dq1-new)
+             (wp/wp-set theta1 idx (+ q1 (* dt dq1-new)))
+             (wp/wp-set theta2-dot idx dq2-new)
+             (wp/wp-set theta2 idx (+ q2 (* dt dq2-new)))))
+     :wgsl "
+@group(0) @binding(0)  var<storage, read_write> theta1:     array<f32>;
+@group(0) @binding(1)  var<storage, read_write> theta1_dot: array<f32>;
+@group(0) @binding(2)  var<storage, read_write> theta2:     array<f32>;
+@group(0) @binding(3)  var<storage, read_write> theta2_dot: array<f32>;
+@group(0) @binding(4)  var<storage, read_write> tau1:       array<f32>;
+@group(0) @binding(5)  var<storage, read_write> tau2:       array<f32>;
+@group(0) @binding(6)  var<uniform>             dt_u:       vec4<f32>;
+@group(0) @binding(7)  var<uniform>             g_u:        vec4<f32>;
+@group(0) @binding(8)  var<uniform>             link1_u:    vec4<f32>;
+@group(0) @binding(9)  var<uniform>             link2_u:    vec4<f32>;
+
+@compute @workgroup_size(64)
+fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
+  let i = gid.x;
+  if (i >= arrayLength(&theta1)) { return; }
+  let q1 = theta1[i];
+  let q2 = theta2[i];
+  let dq1 = theta1_dot[i];
+  let dq2 = theta2_dot[i];
+  let t1 = tau1[i];
+  let t2 = tau2[i];
+  let dt = dt_u.x;
+  let g  = g_u.x;
+  let m1 = link1_u.x; let L1 = link1_u.y; let r1 = link1_u.z; let I1 = link1_u.w;
+  let m2 = link2_u.x;                     let r2 = link2_u.z; let I2 = link2_u.w;
+  let a = m1 * r1 * r1 + I1 + m2 * L1 * L1;
+  let b = m2 * r2 * r2 + I2;
+  let c = m2 * L1 * r2;
+  let cosT2 = cos(q2);
+  let sinT2 = sin(q2);
+  let M11 = a + b + 2.0 * c * cosT2;
+  let M12 = b + c * cosT2;
+  let M22 = b;
+  let h1 = -c * sinT2 * dq2 * dq1
+           - c * sinT2 * (dq1 + dq2) * dq2
+           + m1 * g * r1 * sin(q1)
+           + m2 * g * (L1 * sin(q1) + r2 * sin(q1 + q2));
+  let h2 =  c * sinT2 * dq1 * dq1
+           + m2 * g * r2 * sin(q1 + q2);
+  let b1 = t1 - h1;
+  let b2 = t2 - h2;
+  let det = M11 * M22 - M12 * M12;
+  let ddq1 = (M22 * b1 - M12 * b2) / det;
+  let ddq2 = (M11 * b2 - M12 * b1) / det;
+  let dq1New = dq1 + dt * ddq1;
+  let dq2New = dq2 + dt * ddq2;
+  theta1_dot[i] = dq1New;
+  theta1[i] = q1 + dt * dq1New;
+  theta2_dot[i] = dq2New;
+  theta2[i] = q2 + dt * dq2New;
+}
+"
+     :bindings [(wgpu/storage-binding 0 0)
+                (wgpu/storage-binding 1 1)
+                (wgpu/storage-binding 2 2)
+                (wgpu/storage-binding 3 3)
+                (assoc (wgpu/storage-binding 4 4) :writeback false)
+                (assoc (wgpu/storage-binding 5 5) :writeback false)
                 (wgpu/uniform-binding 6 6)
                 (wgpu/uniform-binding 7 7)
                 (wgpu/uniform-binding 8 8)
