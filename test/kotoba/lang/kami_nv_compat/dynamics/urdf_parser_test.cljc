@@ -1,7 +1,8 @@
 (ns kotoba.lang.kami-nv-compat.dynamics.urdf-parser-test
   "URDF parser coverage (no dedicated TS test)."
   (:require [clojure.test :refer [deftest is testing]]
-            [kotoba.lang.kami-nv-compat.dynamics.urdf-parser :as up]))
+            [kotoba.lang.kami-nv-compat.dynamics.urdf-parser :as up]
+            [kotoba.lang.kami-nv-compat.assets.franka-panda :as franka]))
 
 (def arm-urdf
   "<?xml version=\"1.0\"?>
@@ -38,6 +39,55 @@
     (is (= [0.0 0.0 1.0] (:axis j)))
     (is (= 0.5 (:damping j)))
     (is (= 0.1 (:friction j)))))
+
+;; ADR-2607110900: <limit .../> used to be silently dropped despite the
+;; docstring always having claimed coverage -- parse-joint had no <limit>
+;; regex at all. These are the regression tests for the fix.
+
+(deftest parse-urdf-joint-limit-absent-defaults
+  (testing "no <limit> element (arm-urdf's joint has none) -> defaults,
+           matching kami-articulated's real XML parser's convention"
+    (let [j (first (:joints (up/parse-urdf arm-urdf)))]
+      (is (= ##-Inf (:lower j)))
+      (is (= ##Inf (:upper j)))
+      (is (= 0.0 (:effort j)))
+      (is (= 0.0 (:velocity j))))))
+
+(def limited-joint-urdf
+  "<?xml version=\"1.0\"?>
+<robot name=\"r\">
+  <link name=\"a\"/><link name=\"b\"/>
+  <joint name=\"j\" type=\"revolute\">
+    <parent link=\"a\"/><child link=\"b\"/>
+    <limit lower=\"-1.5\" upper=\"1.5\" velocity=\"2.0\" effort=\"50.0\"/>
+  </joint>
+</robot>")
+
+(deftest parse-urdf-joint-limit-present
+  (testing "<limit .../> is now actually extracted"
+    (let [j (first (:joints (up/parse-urdf limited-joint-urdf)))]
+      (is (= -1.5 (:lower j)))
+      (is (= 1.5 (:upper j)))
+      (is (= 2.0 (:velocity j)))
+      (is (= 50.0 (:effort j))))))
+
+(deftest parse-urdf-franka-panda-real-fixture-limits-round-trip
+  (testing "real Franka Panda FCI datasheet limits (assets/franka-panda.cljc)
+           survive a real parse -- the concrete regression case this bug
+           would have silently broken: build-franka-urdf emits <limit
+           lower upper velocity effort/> on all 9 joints, and this bug
+           would have dropped every one of them"
+    (let [urdf-text (:urdf-text (franka/make-franka-panda))
+          sys (up/parse-urdf urdf-text)
+          by-name (into {} (map (juxt :name identity)) (:joints sys))]
+      (is (= 9 (count (:joints sys))))
+      (is (= -3.0718 (:lower (by-name "panda_joint4"))))
+      (is (= -0.0698 (:upper (by-name "panda_joint4"))))
+      (is (= 2.1750 (:velocity (by-name "panda_joint4"))))
+      (is (= 87.0 (:effort (by-name "panda_joint4"))))
+      (is (= 0.0 (:lower (by-name "panda_finger_joint1"))))
+      (is (= 0.04 (:upper (by-name "panda_finger_joint1"))))
+      (is (= 20.0 (:effort (by-name "panda_finger_joint1")))))))
 
 (deftest parse-urdf-validation
   (testing "unknown joint kind throws"
