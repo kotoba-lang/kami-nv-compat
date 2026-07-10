@@ -9,8 +9,19 @@
 
   Returns plain maps: a system is {:name :links :joints}; a link is
   {:name :inertia}; a joint is {:name :kind :parent :child :origin :axis
-  :damping :friction}; a pose is {:xyz :rpy}; inertia is
-  {:mass :ixx :iyy :izz :ixy :ixz :iyz :com}.")
+  :damping :friction :lower :upper :effort :velocity}; a pose is
+  {:xyz :rpy}; inertia is {:mass :ixx :iyy :izz :ixy :ixz :iyz :com}.
+
+  ADR-2607110900: :lower/:upper/:effort/:velocity (from <limit .../>) were
+  silently dropped here despite the docstring below always having claimed
+  <limit> coverage — parse-joint extracted origin/axis/damping/friction
+  but had no <limit> regex at all. Fixed to extract them the same
+  order-independent per-attribute way as every other tag here (each
+  attribute matched by its own regex, not positionally), defaulting to
+  ##-Inf/##Inf/0.0/0.0 when absent — same shape and same defaults
+  kami-articulated's real XML urdf.cljc already produces, and the same
+  flat (not nested) keys genesis/articulation3d.cljc's
+  from-articulated-system already reads off a joint map.")
 
 ;; ── helpers ───────────────────────────────────────────────────────────────
 
@@ -57,6 +68,24 @@
 
 (def ^:private valid-joint-kinds #{"revolute" "continuous" "prismatic" "fixed"})
 
+(defn- parse-limit
+  "<limit lower=\"\" upper=\"\" effort=\"\" velocity=\"\"/> (any attribute
+  order, any subset present — same order-independent per-attribute
+  extraction as every other tag in this parser). Absent entirely (no
+  <limit> element, e.g. a fixed/continuous joint) or missing individual
+  attributes both fall back to the same defaults kami-articulated's real
+  XML parser uses: ##-Inf/##Inf/0.0/0.0."
+  [body]
+  (let [attr #(extract-attr body %)
+        lower-s (attr #"<limit[^>]*\slower=\"([^\"]+)\"")
+        upper-s (attr #"<limit[^>]*\supper=\"([^\"]+)\"")
+        effort-s (attr #"<limit[^>]*\seffort=\"([^\"]+)\"")
+        velocity-s (attr #"<limit[^>]*\svelocity=\"([^\"]+)\"")]
+    {:lower (if lower-s (parse-num lower-s) ##-Inf)
+     :upper (if upper-s (parse-num upper-s) ##Inf)
+     :effort (if effort-s (parse-num effort-s) 0.0)
+     :velocity (if velocity-s (parse-num velocity-s) 0.0)}))
+
 (defn- parse-joint [name kind body]
   (when-not (contains? valid-joint-kinds kind)
     (throw (ex-info (str "URDF parse: unknown joint type '" kind "' on joint '" name "'") {:kind kind})))
@@ -64,14 +93,16 @@
         _      (when-not parent (throw (ex-info (str "URDF parse: joint '" name "' has no <parent>") {})))
         child  (extract-attr body #"<child\s+link=\"([^\"]+)\"")
         _      (when-not child (throw (ex-info (str "URDF parse: joint '" name "' has no <child>") {})))]
-    {:name name
-     :kind kind
-     :parent parent
-     :child child
-     :origin (parse-pose body)
-     :axis (extract-triplet body #"<axis\s+xyz=\"([^\"]+)\"" [1 0 0])
-     :damping (parse-num (or (extract-attr body #"<dynamics[^>]*\sdamping=\"([^\"]+)\"") "0"))
-     :friction (parse-num (or (extract-attr body #"<dynamics[^>]*\sfriction=\"([^\"]+)\"") "0"))}))
+    (merge
+     {:name name
+      :kind kind
+      :parent parent
+      :child child
+      :origin (parse-pose body)
+      :axis (extract-triplet body #"<axis\s+xyz=\"([^\"]+)\"" [1 0 0])
+      :damping (parse-num (or (extract-attr body #"<dynamics[^>]*\sdamping=\"([^\"]+)\"") "0"))
+      :friction (parse-num (or (extract-attr body #"<dynamics[^>]*\sfriction=\"([^\"]+)\"") "0"))}
+     (parse-limit body))))
 
 ;; ── public ────────────────────────────────────────────────────────────────
 
