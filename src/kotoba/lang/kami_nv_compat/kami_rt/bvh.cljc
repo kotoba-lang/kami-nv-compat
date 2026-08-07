@@ -182,20 +182,39 @@
                 (when (and (> t eps) (<= t t-max))
                   {:t t :tri tri :u uu :v vv})))))))))
 
+;; Known, deliberately unguarded: `inv-d` is infinite when the ray does not move
+;; along an axis, so if a node's slab boundary on that axis exactly equals the ray
+;; origin the product is `(0.0 * Infinity)` = NaN, and since every NaN comparison
+;; is false the node is skipped. No guard is added here because no case could be
+;; constructed where it changes a correct answer: origin-on-boundary with a
+;; zero-direction component means the ray lies inside that boundary plane, which
+;; is already an exact edge graze. A guard nothing exercises is a second lock on a
+;; door the first one holds.
 (defn- slab-hit
   [nodes base ro inv-d t-max]
   (loop [c 0 tmin 0.0 tmax t-max]
     (if (>= c 3)
-      (< tmin tmax)
-      (let [lo (* (- (aget nodes (+ base c)) (ro c)) (inv-d c))
-            hi (* (- (aget nodes (+ base 4 c)) (ro c)) (inv-d c))
+      ;; `<=`, not `<`. A flat axis-aligned triangle has a zero-thickness AABB on
+      ;; one axis, so a ray passing straight through it enters and leaves that
+      ;; slab at the same t and `tmin` equals `tmax`. With a strict `<` the node
+      ;; is rejected and the triangle is invisible — which makes every face of an
+      ;; axis-aligned box invisible, the most common occluder shape there is.
+      ;; This repo's own bvh_test.cljc tilts its fixtures to sidestep it and calls
+      ;; the behaviour inherent; it is not. A touching interval is a real
+      ;; intersection. Rays that genuinely miss still exit through the per-axis
+      ;; `(< tx tn)` test above, which stays strict.
+      (<= tmin tmax)
+      (let [o (ro c)
+            id (inv-d c)
+            lo (* (- (aget nodes (+ base c)) o) id)
+            hi (* (- (aget nodes (+ base 4 c)) o) id)
             t0 (min lo hi)
             t1 (max lo hi)
             tn (max tmin t0)
             tx (min tmax t1)]
         (if (< tx tn)
           false
-(recur (inc c) tn tx))))))
+          (recur (inc c) tn tx))))))
 
 
 (defn- trace-leaf
