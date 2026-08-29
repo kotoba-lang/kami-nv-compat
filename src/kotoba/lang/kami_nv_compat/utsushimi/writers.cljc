@@ -6,7 +6,7 @@
   \"BasicWriter emits the same JSON schema as upstream (diff = 0)\" —
   this port reproduces the documented COCO-2017 / Kitti on-disk field
   schemas exactly; JSON whitespace/formatting is NOT byte-identical to
-  the TS reference's JSON.stringify(obj, null, 2) output (clojure.data.json
+  the TS reference's JSON.stringify(obj, null, 2) output (json.data-json
   emits compact JSON in this repo's pinned version), only the schema.
 
   Portability: instead of writing to a filesystem (which would not run
@@ -19,7 +19,7 @@
 
   ADR-2605261800 SD6 / D10.4 utsushimi."
   (:require [clojure.string :as str]
-            [clojure.data.json :as json]))
+            [json.data-json :as json]))
 
 ;; AnnotatedPrim = a PrimSpec (see randomize.cljc) plus an optional real
 ;; 2D bbox2d [x y w h] (from the camera-projection render bridge).

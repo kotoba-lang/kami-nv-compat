@@ -3,7 +3,7 @@
   (ADR-2605261800 §D6). The URDF/assets cases in that file are deferred to the
   assets wave."
   (:require [clojure.test :refer [deftest is testing]]
-            [clojure.data.json :as json]
+            [json.data-json :as json]
             [kotoba.lang.kami-nv-compat.policies :as p]))
 
 ;; obs_dim 2, hidden_dim 2 (identity W1), action_dim 1 (sum W2): out = tanh(relu(obs)·1).

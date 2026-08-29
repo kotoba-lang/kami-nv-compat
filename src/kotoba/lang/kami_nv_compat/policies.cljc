@@ -7,7 +7,7 @@
   Wave-1 exemplar of the kami-nv-compat TS->CLJC port (ADR-2607020130).
 
   JVM (.clj, not .cljc): the one platform seam here is JSON I/O
-  (clojure.data.json); the MLP math is pure. A cljs branch (js/JSON + the same
+  (json.data-json); the MLP math is pure. A cljs branch (js/JSON + the same
   math) is a follow-up if a browser consumer materializes -- matching
   witness-quorum / pqh / checkpointer's JVM-first precedent.
 
@@ -20,7 +20,7 @@
      :W1_flat (hidden×obs row-major) :b1 :W2_flat (action×hidden) :b2}.
   Internally the spec map uses those same snake_case keyword keys (the wire
   shape, unchanged), so load/serialize is a direct JSON<->map translation."
-  (:require [clojure.data.json :as json]))
+  (:require [json.data-json :as json]))
 
 ;; ── mulberry32 + MLP forward kernel (inlined from src/warp/examples.ts) ────
 
