@@ -2,7 +2,7 @@
   "Port of the extension.toml-parser section of test/nv-compat-amenominaka-edge.test.ts
   (ADR-2605261800 §D6 / D10.4 amenominaka)."
   (:require [clojure.test :refer [deftest is testing]]
-            [clojure.string :as str]
+            [kotoba.lang.text :as str]
             [kotoba.lang.kami-nv-compat.amenominaka.extension :as e]))
 
 (deftest parser-corner-cases

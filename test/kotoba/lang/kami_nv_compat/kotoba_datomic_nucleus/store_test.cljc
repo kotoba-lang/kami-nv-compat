@@ -1,6 +1,6 @@
 (ns kotoba.lang.kami-nv-compat.kotoba-datomic-nucleus.store-test
   "kotoba-datomic-nucleus.store: CID content-addressing + versioned store coverage."
-  (:require [clojure.string :as str]
+  (:require [kotoba.lang.text :as str]
             [clojure.test :refer [deftest is]]
             [kotoba.lang.kami-nv-compat.kotoba-datomic-nucleus.store :as store]))
 
