@@ -6,7 +6,7 @@
   available. Generates valid URDFs (serial link chains, revolute/prismatic/
   continuous/fixed joints with axes + limits, placeholder unit-mass inertias).
   Wave 5 of the kami-nv-compat TS->CLJC port (ADR-2607020130)."
-  (:require [clojure.string :as str]))
+  (:require [kotoba.lang.text :as str]))
 
 (defn- num-str
   "Format a number for XML output, matching JS Number->string (trailing '.0'

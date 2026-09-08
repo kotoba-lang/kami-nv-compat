@@ -16,7 +16,7 @@
 
   Clean-room: from-spec versioned store. No Nucleus source/binaries.
   ADR-2605261800 SD6 / D10.4 kotoba-datomic-nucleus."
-  (:require [clojure.string :as str]
+  (:require [kotoba.lang.text :as str]
             [multiformats.core :as mf]))
 
 (declare notify!)

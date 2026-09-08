@@ -10,7 +10,7 @@
 
   The URDF is hand-emitted (not via build-serial-chain-urdf) so it can embed
   real per-link inertials instead of unit-mass placeholders."
-  (:require [clojure.string :as str]))
+  (:require [kotoba.lang.text :as str]))
 
 (defn- num-str [n]
   (let [s (str n)]

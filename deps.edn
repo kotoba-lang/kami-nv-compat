@@ -1,5 +1,14 @@
 {:paths ["src"]
- :deps {io.github.kotoba-lang/json {:git/sha "b47b06486b3ad53051bc7d8bf361f4176f467202"}
+ :deps {
+        ;; kotoba.lang.text, not clojure.string. Pinned as an explicit floor:
+        ;; tools.deps takes the NEWEST sha it is shown, so without a floor here
+        ;; this repo silently rides whatever a sibling happens to name.
+        io.github.kotoba-lang/text {:git/sha "73bdb13ae7a3d004b44bca08be03a3191157a38f"}
+              ;; Advanced from b47b064: that pin predates json's kwargs fix
+       ;; (d5137c7), so `(read-str s :key-fn keyword)` -- the clojure.data.json
+       ;; call shape this repo was migrated to -- threw ArityException at every
+       ;; call site. The fix was on json's main and could not reach here.
+       io.github.kotoba-lang/json {:git/sha "0945bf526bcb077f891c4aadb20d607b74da07cd"}
         io.github.kotoba-lang/io-multiformats {:git/sha "35b608c9b21024f01daedbd399092a3b84d2ed0a"}}
  :aliases
  {:test {:extra-paths ["test"]

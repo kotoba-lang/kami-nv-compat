@@ -6,7 +6,7 @@
   format trajectory and (b) a Chain-of-Causation trace. Deterministic +
   auditable; NO actuation — returns a recommended trajectory only. Wave 9 of
   ADR-2607020130."
-  (:require [clojure.string :as str]
+  (:require [kotoba.lang.text :as str]
             [kotoba.lang.kami-nv-compat.kami-drive.coc :as coc]
             [kotoba.lang.kami-nv-compat.kami-drive.unicycle :as u]))
 
@@ -28,7 +28,7 @@
 (defn command-from-instruction
   "Map a free-text instruction to a navigation command (nil if none)."
   [text]
-  (let [t (str/lower-case text)]
+  (let [t (str/lower text)]
     (cond
       (some #(str/includes? t %) stop-words)                                   "stop"
       (and (some #(str/includes? t %) left-words)  (str/includes? t "turn"))   "turn_left"

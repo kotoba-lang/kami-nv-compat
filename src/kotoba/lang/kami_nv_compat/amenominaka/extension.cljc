@@ -11,7 +11,7 @@
   [package] fields directly.
 
   Pure data + parsing, no platform seam — portable JVM/cljs."
-  (:require [clojure.string :as str]))
+  (:require [kotoba.lang.text :as str]))
 
 ;; ── IExt lifecycle (mirrors omni.ext.IExt) ────────────────────────────────
 
@@ -135,25 +135,25 @@
   :dependencies :python-modules :raw-tables."
   [text]
   (let [[root _current-path]
-        (loop [lines (clojure.string/split text #"\n") root {} current-path []]
+        (loop [lines (str/split text #"\n") root {} current-path []]
           (if-let [raw-line (first lines)]
             (let [line (-> raw-line strip-comment str/trim)]
               (if (str/blank? line)
                 (recur (rest lines) root current-path)
                 (cond
                   (and (str/starts-with? line "[[") (str/includes? line "]]"))
-                  (let [name (-> line (subs 2 (clojure.string/index-of line "]]")) str/trim)
-                        path (clojure.string/split name #"\.")
+                  (let [name (-> line (subs 2 (str/index-of line "]]")) str/trim)
+                        path (str/split name #"\.")
                         [root' new-path] (ensure-array-of-tables-in root path)]
                     (recur (rest lines) root' new-path))
 
                   (and (str/starts-with? line "[") (str/includes? line "]"))
-                  (let [name (-> line (subs 1 (clojure.string/index-of line "]")) str/trim)
-                        path (clojure.string/split name #"\.")]
+                  (let [name (-> line (subs 1 (str/index-of line "]")) str/trim)
+                        path (str/split name #"\.")]
                     (recur (rest lines) (ensure-table-in root path) path))
 
                   :else
-                  (let [eq (clojure.string/index-of line "=")]
+                  (let [eq (str/index-of line "=")]
                     (if (neg? eq)
                       (recur (rest lines) root current-path)
                       (let [k (strip-quotes (subs line 0 eq))
