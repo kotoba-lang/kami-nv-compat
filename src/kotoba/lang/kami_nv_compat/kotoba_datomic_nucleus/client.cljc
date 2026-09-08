@@ -9,7 +9,7 @@
   mount name; one client-held store backs all servers here).
 
   ADR-2605261800 SD6 / D10.4 kotoba-datomic-nucleus."
-  (:require [clojure.string :as str]
+  (:require [kotoba.lang.text :as str]
             [kotoba.lang.kami-nv-compat.kotoba-datomic-nucleus.store :as store]))
 
 (defn parse-url

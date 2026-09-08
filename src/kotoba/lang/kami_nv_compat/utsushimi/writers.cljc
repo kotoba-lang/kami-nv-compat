@@ -18,7 +18,7 @@
   full-image placeholder.
 
   ADR-2605261800 SD6 / D10.4 utsushimi."
-  (:require [clojure.string :as str]
+  (:require [kotoba.lang.text :as str]
             [json.data-json :as json]))
 
 ;; AnnotatedPrim = a PrimSpec (see randomize.cljc) plus an optional real

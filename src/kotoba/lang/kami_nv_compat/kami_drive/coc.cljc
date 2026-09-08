@@ -8,14 +8,14 @@
   (observation → inference → action, grounded to a keyframe) — making planner
   decisions auditable. No Alpamayo data/weights/text copied; from-spec schema.
   AV scope per wadachi / kami-autodrive. Wave 8 of ADR-2607020130."
-  (:require [clojure.string :as str]))
+  (:require [kotoba.lang.text :as str]))
 
 (def event-clusters
   #{"nominal" "vru_interaction" "vehicle_cut_in" "intersection"
     "yield" "lane_change" "stop" "obstacle" "merge"})
 
 (defn- lower-first [s]
-  (if (str/blank? s) s (str (str/lower-case (subs s 0 1)) (subs s 1))))
+  (if (str/blank? s) s (str (str/lower (subs s 0 1)) (subs s 1))))
 
 (defn render-narrative
   "Render a default narrative from `steps` (deterministic; a verbalizer can

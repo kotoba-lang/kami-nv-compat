@@ -5,7 +5,7 @@
   C URDF (BSD-3) + Hwangbo et al. 2019; minimal kinematic-tree reproduction.
   Trademark: 'ANYmal' is a trademark of ANYbotics AG; API-namespace
   localization only. Wave 7 of ADR-2607020130."
-  (:require [clojure.string :as str]
+  (:require [kotoba.lang.text :as str]
             [kotoba.lang.kami-nv-compat.assets.urdf-builder :as ub]))
 
 (def leg-names ["LF" "LH" "RF" "RH"])
