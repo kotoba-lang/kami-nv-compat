@@ -34,8 +34,8 @@ as unconfirmed rather than assume it's still accurate.
 ## Development
 
 ```bash
-clojure -M:lint   # clj-kondo
-clojure -M:test   # cognitect test-runner
+kbb -M:lint   # clj-kondo
+kbb -M:test   # cognitect test-runner
 ```
 
 ## License
