@@ -1,7 +1,7 @@
 (ns kotoba.lang.kami-nv-compat.alpasim-test
   "Coverage for alpasim.cljc's real new logic: run-closed-loop's rollout
   loop (progress/collision/comfort accumulation + reward shaping)."
-  (:require [clojure.test :refer [deftest is testing]]
+  (:require [kotoba.test :refer [deftest is testing]]
             [kotoba.lang.kami-nv-compat.alpamayo :as alp]
             [kotoba.lang.kami-nv-compat.alpasim :as sim]))
 

@@ -1,6 +1,6 @@
 (ns kotoba.lang.kami-nv-compat.controllers.operational-space-test
   "OperationalSpaceController coverage (no dedicated TS test)."
-  (:require [clojure.test :refer [deftest is testing]]
+  (:require [kotoba.test :refer [deftest is testing]]
             [kotoba.lang.kami-nv-compat.controllers.operational-space :as osc]))
 
 (defn- close? [a b tol] (< (Math/abs (- a b)) tol))

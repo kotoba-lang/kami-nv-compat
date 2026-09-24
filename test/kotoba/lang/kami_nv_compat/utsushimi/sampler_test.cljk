@@ -3,7 +3,7 @@
   Verifies internal consistency (determinism, formula fidelity to the TS
   source, output bounds) — NOT independently checked against the Python
   oracle (no Python runtime available in this environment)."
-  (:require [clojure.test :refer [deftest is]]
+  (:require [kotoba.test :refer [deftest is]]
             [kotoba.lang.kami-nv-compat.utsushimi.sampler :as sampler]))
 
 (deftest next-u01-in-range

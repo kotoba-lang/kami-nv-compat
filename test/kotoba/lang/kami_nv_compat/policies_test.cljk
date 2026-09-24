@@ -2,7 +2,7 @@
   "Port of the MLP (policies) section of test/nv-compat-policies-assets.test.ts
   (ADR-2605261800 §D6). The URDF/assets cases in that file are deferred to the
   assets wave."
-  (:require [clojure.test :refer [deftest is testing]]
+  (:require [kotoba.test :refer [deftest is testing]]
             [json.data-json :as json]
             [kotoba.lang.kami-nv-compat.policies :as p]))
 

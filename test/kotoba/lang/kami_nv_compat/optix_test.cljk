@@ -6,7 +6,7 @@
   context/module/pipeline map in a failure-prone assertion (pr-str would
   recurse into the atom's contents and blow up); always assert on specific
   fields instead."
-  (:require [clojure.test :refer [deftest is testing]]
+  (:require [kotoba.test :refer [deftest is testing]]
             [kotoba.lang.kami-nv-compat.kami-rt.bvh :as bvh]
             [kotoba.lang.kami-nv-compat.kami-rt.index :as rt]
             [kotoba.lang.kami-nv-compat.optix :as ox]))

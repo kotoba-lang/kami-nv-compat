@@ -2,7 +2,7 @@
   "e7m-shugyo.managers: generic Isaac-Lab-style manager framework coverage.
   Uses synthetic term functions over a plain {:x :y} env — the managers
   are generic over env shape, so no cartpole dependency is needed here."
-  (:require [clojure.test :refer [deftest is]]
+  (:require [kotoba.test :refer [deftest is]]
             [kotoba.lang.kami-nv-compat.e7m-shugyo.managers :as mgr]))
 
 (defn- get-x [env _] (:x @env))

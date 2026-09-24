@@ -1,6 +1,6 @@
 (ns kotoba.lang.kami-nv-compat.kami-rt.bvh-test
   "kami-rt.bvh: triangle-soup / BVH build / ray-triangle intersection coverage."
-  (:require [clojure.test :refer [deftest is testing]]
+  (:require [kotoba.test :refer [deftest is testing]]
             [kotoba.lang.kami-nv-compat.kami-rt.bvh :as bvh]))
 
 (def one-tri

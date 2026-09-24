@@ -1,7 +1,7 @@
 (ns kotoba.lang.kami-nv-compat.assets.anymal-c-test
   "ANYmal C asset coverage (no dedicated TS test — mirrors the Franka
   count/names consistency + structure)."
-  (:require [clojure.test :refer [deftest is testing]]
+  (:require [kotoba.test :refer [deftest is testing]]
             [kotoba.lang.kami-nv-compat.assets.anymal-c :as ac]
             [kotoba.lang.kami-nv-compat.assets.urdf-builder :as ub]))
 

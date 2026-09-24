@@ -1,7 +1,7 @@
 (ns kotoba.lang.kami-nv-compat.kotoba-datomic-nucleus.index-test
   "kotoba-datomic-nucleus.index: Nucleus-stored USDA -> kami-rt/kami-rtx
   scene bridge coverage (completes the wave-28 deferral)."
-  (:require [clojure.test :refer [deftest is]]
+  (:require [kotoba.test :refer [deftest is]]
             [kotoba.lang.kami-nv-compat.kotoba-datomic-nucleus.client :as client]
             [kotoba.lang.kami-nv-compat.kotoba-datomic-nucleus.index :as nucleus-index]))
 

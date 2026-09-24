@@ -1,7 +1,7 @@
 (ns kotoba.lang.kami-nv-compat.dynamics.articulated-dynamics-test
   "articulated-dynamics FOUNDATION coverage (matrix + spatial-inertia helpers).
   buildArticulation / kinematics / solvers land with their waves."
-  (:require [clojure.test :refer [deftest is testing]]
+  (:require [kotoba.test :refer [deftest is testing]]
             [kotoba.lang.kami-nv-compat.dynamics.articulated-dynamics :as ad]))
 
 (defn- mat-close? [a b tol]

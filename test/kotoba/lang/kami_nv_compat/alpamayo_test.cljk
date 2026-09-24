@@ -3,7 +3,7 @@
   merging, predict/predict-async/predict-from-input, and
   ego-speed-from-history (indirectly via predict-from-input). The
   underlying kami-drive.planner/plan is already covered by planner-test."
-  (:require [clojure.test :refer [deftest is testing]]
+  (:require [kotoba.test :refer [deftest is testing]]
             [kotoba.lang.kami-nv-compat.alpamayo :as alp]))
 
 (def base-obs {:ego {:x 0 :y 0 :yaw 0 :speed 5} :command "keep_lane" :agents []})

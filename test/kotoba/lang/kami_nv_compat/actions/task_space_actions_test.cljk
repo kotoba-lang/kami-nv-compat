@@ -1,6 +1,6 @@
 (ns kotoba.lang.kami-nv-compat.actions.task-space-actions-test
   "Task-space action wrappers coverage."
-  (:require [clojure.test :refer [deftest is testing]]
+  (:require [kotoba.test :refer [deftest is testing]]
             [kotoba.lang.kami-nv-compat.actions.task-space-actions :as tsa]
             [kotoba.lang.kami-nv-compat.actions.articulated-env :as ae]
             [kotoba.lang.kami-nv-compat.actions.action-term :as at]))

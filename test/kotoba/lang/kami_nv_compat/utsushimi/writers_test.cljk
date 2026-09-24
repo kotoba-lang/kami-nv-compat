@@ -1,6 +1,6 @@
 (ns kotoba.lang.kami-nv-compat.utsushimi.writers-test
   "utsushimi.writers: BasicWriter/CocoWriter/KittiWriter + registry coverage."
-  (:require [clojure.test :refer [deftest is]]
+  (:require [kotoba.test :refer [deftest is]]
             [kotoba.lang.kami-nv-compat.utsushimi.writers :as w]))
 
 (def cube-prim {:kind :cube :semantics [["class" "cube"]] :bbox2d [10.0 20.0 30.0 40.0]})

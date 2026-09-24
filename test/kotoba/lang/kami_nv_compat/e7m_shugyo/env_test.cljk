@@ -1,6 +1,6 @@
 (ns kotoba.lang.kami-nv-compat.e7m-shugyo.env-test
   "e7m-shugyo.env: ManagerBasedRLEnv (vectorized Cartpole) end-to-end coverage."
-  (:require [clojure.test :refer [deftest is]]
+  (:require [kotoba.test :refer [deftest is]]
             [kotoba.lang.kami-nv-compat.e7m-shugyo.managers :as mgr]
             [kotoba.lang.kami-nv-compat.e7m-shugyo.env :as env]))
 

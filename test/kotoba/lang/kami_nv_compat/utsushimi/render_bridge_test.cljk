@@ -1,7 +1,7 @@
 (ns kotoba.lang.kami-nv-compat.utsushimi.render-bridge-test
   "utsushimi.render-bridge: pinhole projection + AABB bbox + tessellation +
   CPU RGB rendering coverage."
-  (:require [clojure.test :refer [deftest is]]
+  (:require [kotoba.test :refer [deftest is]]
             [kotoba.lang.kami-nv-compat.utsushimi.render-bridge :as rb]))
 
 (defn- symmetric-cam []

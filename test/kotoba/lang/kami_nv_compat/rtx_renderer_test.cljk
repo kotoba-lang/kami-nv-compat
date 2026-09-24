@@ -1,7 +1,7 @@
 (ns kotoba.lang.kami-nv-compat.rtx-renderer-test
   "Coverage for rtx-renderer.cljc: settings defaults/merge, REAL_TIME
   clamping, create-scene, and both the sync and async-shaped render paths."
-  (:require [clojure.test :refer [deftest is testing]]
+  (:require [kotoba.test :refer [deftest is testing]]
             [kotoba.lang.kami-nv-compat.kami-rt.bvh :as bvh]
             [kotoba.lang.kami-nv-compat.kami-rt.pathtrace :as pt]
             [kotoba.lang.kami-nv-compat.rtx-renderer :as rtx]))

@@ -1,6 +1,6 @@
 (ns kotoba.lang.kami-nv-compat.kami-drive.planner-test
   "kami-drive planner coverage (no dedicated TS test)."
-  (:require [clojure.test :refer [deftest is]]
+  (:require [kotoba.test :refer [deftest is]]
             [kotoba.lang.kami-nv-compat.kami-drive.planner :as p]))
 
 (defn- ego [speed] {:x 0 :y 0 :yaw 0 :speed speed})

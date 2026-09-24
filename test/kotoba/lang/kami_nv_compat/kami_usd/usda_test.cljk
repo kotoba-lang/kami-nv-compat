@@ -1,6 +1,6 @@
 (ns kotoba.lang.kami-nv-compat.kami-usd.usda-test
   "kami-usd.usda: USDA recursive-descent parser coverage."
-  (:require [clojure.test :refer [deftest is]]
+  (:require [kotoba.test :refer [deftest is]]
             [kotoba.lang.kami-nv-compat.kami-usd.usda :as usda]))
 
 (deftest single-empty-prim

@@ -1,7 +1,7 @@
 (ns kotoba.lang.kami-nv-compat.kami-usd.geom-test
   "kami-usd.geom: Mat4 algebra, xformOp composition, material extraction,
   fan triangulation, and stage-flatten coverage."
-  (:require [clojure.test :refer [deftest is]]
+  (:require [kotoba.test :refer [deftest is]]
             [kotoba.lang.kami-nv-compat.kami-usd.usda :as usda]
             [kotoba.lang.kami-nv-compat.kami-usd.geom :as geom]))
 

@@ -1,6 +1,6 @@
 (ns kotoba.lang.kami-nv-compat.wadachi-sim.world-test
   "wadachi-sim.world: oriented-box tessellation + ground-truth coverage."
-  (:require [clojure.test :refer [deftest is]]
+  (:require [kotoba.test :refer [deftest is]]
             [kotoba.lang.kami-nv-compat.wadachi-sim.world :as world]))
 
 (deftest box-tris-shape

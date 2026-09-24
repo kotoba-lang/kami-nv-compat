@@ -1,6 +1,6 @@
 (ns kotoba.lang.kami-nv-compat.kami-drive.unicycle-test
   "BEV unicycle kinematics coverage (no dedicated TS test)."
-  (:require [clojure.test :refer [deftest is testing]]
+  (:require [kotoba.test :refer [deftest is testing]]
             [kotoba.lang.kami-nv-compat.kami-drive.unicycle :as u]))
 
 (defn- close? [a b tol] (< (Math/abs (- a b)) tol))

@@ -1,7 +1,7 @@
 (ns kotoba.lang.kami-nv-compat.omni-usd-test
   "omni-usd: Stage/Prim/Attribute API-compat + USD -> kami-rt/kami-rtx
   scene-bridge coverage."
-  (:require [clojure.test :refer [deftest is]]
+  (:require [kotoba.test :refer [deftest is]]
             [kotoba.lang.kami-nv-compat.kami-rt.bvh :as bvh]
             [kotoba.lang.kami-nv-compat.omni-usd :as omni-usd]))
 
