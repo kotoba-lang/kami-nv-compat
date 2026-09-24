@@ -1,6 +1,6 @@
 (ns kotoba.lang.kami-nv-compat.assets.franka-panda-test
   "Port of the Franka-Panda asset case from test/nv-compat-policies-assets.test.ts."
-  (:require [clojure.test :refer [deftest is testing]]
+  (:require [kotoba.test :refer [deftest is testing]]
             [kotoba.lang.kami-nv-compat.assets.franka-panda :as fp]
             [kotoba.lang.kami-nv-compat.assets.urdf-builder :as ub]))
 

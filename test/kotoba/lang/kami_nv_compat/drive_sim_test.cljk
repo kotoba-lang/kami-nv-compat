@@ -3,7 +3,7 @@
   -lidar/-radar defaults + overrides, and obstacles-from-stage. DriveSim
   itself is already tested via wadachi-sim.index-test / world-test /
   sensors-test — no duplicate coverage here."
-  (:require [clojure.test :refer [deftest is testing]]
+  (:require [kotoba.test :refer [deftest is testing]]
             [kotoba.lang.kami-nv-compat.drive-sim :as ds]
             [kotoba.lang.kami-nv-compat.omni-usd :as usd]))
 

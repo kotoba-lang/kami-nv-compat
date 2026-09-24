@@ -1,6 +1,6 @@
 (ns kotoba.lang.kami-nv-compat.utsushimi.randomize-test
   "utsushimi.randomize: create/modify/randomize op constructors + resolve-op coverage."
-  (:require [clojure.test :refer [deftest is]]
+  (:require [kotoba.test :refer [deftest is]]
             [kotoba.lang.kami-nv-compat.utsushimi.sampler :as sampler]
             [kotoba.lang.kami-nv-compat.utsushimi.distribution :as dist]
             [kotoba.lang.kami-nv-compat.utsushimi.randomize :as r]))

@@ -1,6 +1,6 @@
 (ns kotoba.lang.kami-nv-compat.kami-rt.wgpu-pathtrace-test
   "wgpu-pathtrace JVM coverage: pack-path-params shape + CPU fallback + rt-dispatch! seam."
-  (:require [clojure.test :refer [deftest is testing]]
+  (:require [kotoba.test :refer [deftest is testing]]
             [kotoba.lang.kami-nv-compat.warp.wgpu-backend :as wgpu]
             [kotoba.lang.kami-nv-compat.kami-rt.bvh :as bvh]
             [kotoba.lang.kami-nv-compat.kami-rt.pathtrace :as pt]

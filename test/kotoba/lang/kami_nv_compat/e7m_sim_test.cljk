@@ -1,6 +1,6 @@
 (ns kotoba.lang.kami-nv-compat.e7m-sim-test
   "e7m-sim coverage: World/Articulation/RigidPrim over dynamics."
-  (:require [clojure.test :refer [deftest is testing]]
+  (:require [kotoba.test :refer [deftest is testing]]
             [kotoba.lang.kami-nv-compat.e7m-sim :as sim]))
 
 (def pendulum-urdf

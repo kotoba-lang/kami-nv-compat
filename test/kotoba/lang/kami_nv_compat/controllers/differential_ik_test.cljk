@@ -1,6 +1,6 @@
 (ns kotoba.lang.kami-nv-compat.controllers.differential-ik-test
   "DifferentialIKController coverage (no dedicated TS test)."
-  (:require [clojure.test :refer [deftest is testing]]
+  (:require [kotoba.test :refer [deftest is testing]]
             [kotoba.lang.kami-nv-compat.controllers.differential-ik :as dik]))
 
 (defn- close? [a b tol] (< (Math/abs (- a b)) tol))

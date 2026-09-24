@@ -3,7 +3,7 @@
   end via the Application lifecycle. `app`/`commands` themselves are pure
   re-exports of already-tested amenominaka.application / amenominaka.commands
   / amenominaka.extension — no additional coverage needed here."
-  (:require [clojure.test :refer [deftest is testing]]
+  (:require [kotoba.test :refer [deftest is testing]]
             [kotoba.lang.kami-nv-compat.amenominaka.application :as app]
             [kotoba.lang.kami-nv-compat.omni-kit-app :as oka]))
 

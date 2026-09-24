@@ -1,6 +1,6 @@
 (ns kotoba.lang.kami-nv-compat.warp.warp-test
   "warp.ts core coverage."
-  (:require [clojure.test :refer [deftest is testing]]
+  (:require [kotoba.test :refer [deftest is testing]]
             [kotoba.lang.kami-nv-compat.warp.warp :as w]))
 
 (defn- close? [a b tol] (< (Math/abs (- a b)) tol))

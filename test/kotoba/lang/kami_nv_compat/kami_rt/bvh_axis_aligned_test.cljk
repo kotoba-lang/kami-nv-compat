@@ -26,7 +26,7 @@
    A ray fired from inside a sealed solid must hit something in *every*
    direction. Any escape is a bug, with no tolerance argument available — unlike
    a grazing-angle test, where two implementations may legitimately disagree."
-  (:require [clojure.test :refer [deftest is testing]]
+  (:require [kotoba.test :refer [deftest is testing]]
             [kotoba.lang.kami-nv-compat.kami-rt.bvh :as bvh]))
 
 (defn closed-box

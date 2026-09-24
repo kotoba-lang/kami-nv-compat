@@ -1,6 +1,6 @@
 (ns kotoba.lang.kami-nv-compat.kotoba-datomic-nucleus.client-test
   "kotoba-datomic-nucleus.client: omni.client-style URL API coverage."
-  (:require [clojure.test :refer [deftest is]]
+  (:require [kotoba.test :refer [deftest is]]
             [kotoba.lang.kami-nv-compat.kotoba-datomic-nucleus.client :as client]))
 
 (deftest parse-url-omniverse-scheme

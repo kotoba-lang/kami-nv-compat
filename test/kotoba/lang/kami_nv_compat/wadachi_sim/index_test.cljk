@@ -1,6 +1,6 @@
 (ns kotoba.lang.kami-nv-compat.wadachi-sim.index-test
   "wadachi-sim.index: DriveSim (world/sense/observation/step!/run-rollout!) coverage."
-  (:require [clojure.test :refer [deftest is]]
+  (:require [kotoba.test :refer [deftest is]]
             [kotoba.lang.kami-nv-compat.wadachi-sim.index :as idx]))
 
 (defn- scenario []

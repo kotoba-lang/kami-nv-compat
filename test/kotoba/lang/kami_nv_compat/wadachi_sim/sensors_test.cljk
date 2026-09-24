@@ -1,6 +1,6 @@
 (ns kotoba.lang.kami-nv-compat.wadachi-sim.sensors-test
   "wadachi-sim.sensors: sensor-pose + camera + LiDAR + radar coverage."
-  (:require [clojure.test :refer [deftest is]]
+  (:require [kotoba.test :refer [deftest is]]
             [kotoba.lang.kami-nv-compat.wadachi-sim.world :as world]
             [kotoba.lang.kami-nv-compat.wadachi-sim.sensors :as sensors]))
 

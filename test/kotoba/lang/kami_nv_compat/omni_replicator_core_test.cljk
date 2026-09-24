@@ -2,7 +2,7 @@
   "Coverage for omni-replicator-core.cljc's real new logic: the ILayer fluent
   builder. Everything else in the facade is a pure re-export of already-
   tested utsushimi.* namespaces — no additional coverage needed here."
-  (:require [clojure.test :refer [deftest is testing]]
+  (:require [kotoba.test :refer [deftest is testing]]
             [kotoba.lang.kami-nv-compat.omni-replicator-core :as rep]))
 
 (deftest new-layer-defaults

@@ -1,6 +1,6 @@
 (ns kotoba.lang.kami-nv-compat.kami-usd.index-test
   "kami-usd.index: end-to-end USDA -> kami-rt Scene / kami-rtx PathScene coverage."
-  (:require [clojure.test :refer [deftest is]]
+  (:require [kotoba.test :refer [deftest is]]
             [kotoba.lang.kami-nv-compat.kami-rt.bvh :as bvh]
             [kotoba.lang.kami-nv-compat.kami-rt.pathtrace :as pt]
             [kotoba.lang.kami-nv-compat.kami-usd.index :as kami-usd]))

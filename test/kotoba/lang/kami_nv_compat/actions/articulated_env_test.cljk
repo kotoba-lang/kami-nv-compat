@@ -1,6 +1,6 @@
 (ns kotoba.lang.kami-nv-compat.actions.articulated-env-test
   "write-effort! dispatch coverage."
-  (:require [clojure.test :refer [deftest is testing]]
+  (:require [kotoba.test :refer [deftest is testing]]
             [kotoba.lang.kami-nv-compat.actions.articulated-env :as ae]))
 
 (deftest write-effort-torques-buffer

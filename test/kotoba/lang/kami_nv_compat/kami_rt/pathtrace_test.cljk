@@ -1,6 +1,6 @@
 (ns kotoba.lang.kami-nv-compat.kami-rt.pathtrace-test
   "kami-rt.pathtrace: materials, RNG, ONB, and end-to-end radiance coverage."
-  (:require [clojure.test :refer [deftest is]]
+  (:require [kotoba.test :refer [deftest is]]
             [kotoba.lang.kami-nv-compat.kami-rt.bvh :as bvh]
             [kotoba.lang.kami-nv-compat.kami-rt.pathtrace :as pt]))
 

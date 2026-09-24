@@ -1,6 +1,6 @@
 (ns kotoba.lang.kami-nv-compat.e7m-shugyo.cartpole-test
   "e7m-shugyo.cartpole: Barto-Sutton dynamics + LCG reset + MDP term coverage."
-  (:require [clojure.test :refer [deftest is]]
+  (:require [kotoba.test :refer [deftest is]]
             [kotoba.lang.kami-nv-compat.utsushimi.sampler :as sampler]
             [kotoba.lang.kami-nv-compat.e7m-shugyo.cartpole :as cp]))
 

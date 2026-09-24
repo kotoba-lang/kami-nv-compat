@@ -1,6 +1,6 @@
 (ns kotoba.lang.kami-nv-compat.assets.ur10-test
   "UR10 asset coverage (no dedicated TS test — structural checks)."
-  (:require [clojure.test :refer [deftest is testing]]
+  (:require [kotoba.test :refer [deftest is testing]]
             [kotoba.lang.kami-nv-compat.assets.ur10 :as ur10]))
 
 (deftest ur10-asset

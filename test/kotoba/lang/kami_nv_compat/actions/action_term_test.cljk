@@ -1,6 +1,6 @@
 (ns kotoba.lang.kami-nv-compat.actions.action-term-test
   "ActionTerm + ActionManager coverage."
-  (:require [clojure.test :refer [deftest is]]
+  (:require [kotoba.test :refer [deftest is]]
             [kotoba.lang.kami-nv-compat.actions.action-term :as at]))
 
 (defn mock-term

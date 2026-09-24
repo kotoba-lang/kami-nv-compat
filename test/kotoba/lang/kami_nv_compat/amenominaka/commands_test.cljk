@@ -2,7 +2,7 @@
   "Port of the CommandStack section of test/nv-compat-amenominaka-edge.test.ts
   (ADR-2605261800 §D6 / D10.4 amenominaka). The extension.toml + Application
   lifecycle sections land with their waves."
-  (:require [clojure.test :refer [deftest is testing]]
+  (:require [kotoba.test :refer [deftest is testing]]
             [kotoba.lang.kami-nv-compat.amenominaka.commands :as c]))
 
 (deftest command-stack-empty-operations

@@ -3,7 +3,7 @@
   cartpole-step-kernel, two-link-arm-step-kernel, franka-fk-inline,
   franka-fk-kernel). Each kernel is exercised via warp.warp/launch, matching
   how a real caller would dispatch the sync/CPU-fallback path."
-  (:require [clojure.test :refer [deftest is testing]]
+  (:require [kotoba.test :refer [deftest is testing]]
             [kotoba.lang.kami-nv-compat.warp.examples :as ex]
             [kotoba.lang.kami-nv-compat.warp.warp :as wp]))
 

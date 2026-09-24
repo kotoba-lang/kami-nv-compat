@@ -1,6 +1,6 @@
 (ns kotoba.lang.kami-nv-compat.utsushimi.distribution-test
   "utsushimi.distribution: Dist constructors + sample coverage."
-  (:require [clojure.test :refer [deftest is]]
+  (:require [kotoba.test :refer [deftest is]]
             [kotoba.lang.kami-nv-compat.utsushimi.sampler :as sampler]
             [kotoba.lang.kami-nv-compat.utsushimi.distribution :as dist]))
 

@@ -1,6 +1,6 @@
 (ns kotoba.lang.kami-nv-compat.warp.wgpu-backend-test
   "wgpu-backend JVM coverage: sync fallback + binding/kernel data shapes."
-  (:require [clojure.test :refer [deftest is testing]]
+  (:require [kotoba.test :refer [deftest is testing]]
             [kotoba.lang.kami-nv-compat.warp.wgpu-backend :as wgpu]
             [kotoba.lang.kami-nv-compat.warp.warp :as wp]))
 

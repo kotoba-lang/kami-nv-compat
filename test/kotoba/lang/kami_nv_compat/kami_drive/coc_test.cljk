@@ -1,6 +1,6 @@
 (ns kotoba.lang.kami-nv-compat.kami-drive.coc-test
   "Chain-of-Causation schema + builder + parser coverage (no dedicated TS test)."
-  (:require [clojure.test :refer [deftest is testing]]
+  (:require [kotoba.test :refer [deftest is testing]]
             [kotoba.lang.kami-nv-compat.kami-drive.coc :as coc]))
 
 (deftest render-narrative-test
