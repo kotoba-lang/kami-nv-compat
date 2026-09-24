@@ -4,7 +4,7 @@
   simulation context + Articulation + RigidPrim) over the Featherstone
   articulated-dynamics module. Pure logic, no Isaac Sim source/USD/binaries.
   Wave 19 of ADR-2607020130."
-  (:require [kotoba.lang.kami-nv-compat.dynamics.articulated-dynamics :as dyn]
+  (:require [kotoba.lang.coll :as kcoll] [kotoba.lang.kami-nv-compat.dynamics.articulated-dynamics :as dyn]
             [kotoba.lang.kami-nv-compat.dynamics.urdf-parser :as urdf]))
 
 (defn- pad-to
@@ -71,7 +71,7 @@
   (dyn/forward-kinematics (:built @a) (:q (:state @a))))
 
 (defn articulation-get-body-pose [a joint-name]
-  (let [idx (.indexOf ^java.util.List (:joint-names (:built @a)) joint-name)]
+  (let [idx (kcoll/index-of (:joint-names (:built @a)) joint-name)]
     (when (>= idx 0)
       (let [pose (nth (articulation-forward-kinematics a) idx)]
         {:position (:p pose) :rotation (:R pose)}))))
