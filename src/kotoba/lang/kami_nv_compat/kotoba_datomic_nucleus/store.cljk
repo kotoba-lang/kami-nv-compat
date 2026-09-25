@@ -16,7 +16,7 @@
 
   Clean-room: from-spec versioned store. No Nucleus source/binaries.
   ADR-2605261800 SD6 / D10.4 kotoba-datomic-nucleus."
-  (:require [kotoba.lang.text :as str]
+  (:require [kotoba.bytes :as kbytes] [kotoba.lang.text :as str]
             [multiformats.core :as mf]))
 
 (declare notify!)
@@ -24,7 +24,7 @@
 (defn cid-of
   "Content identifier — \"sha2-256:\" + hex digest of `content`'s UTF-8 bytes."
   [content]
-  (let [bs #?(:clj (.getBytes ^String content "UTF-8")
+  (let [bs #?(:clj (kbytes/utf8-bytes ^String content)
               :cljs (.encode (js/TextEncoder.) content))]
     (str "sha2-256:" (mf/hexify (mf/sha256 bs)))))
 

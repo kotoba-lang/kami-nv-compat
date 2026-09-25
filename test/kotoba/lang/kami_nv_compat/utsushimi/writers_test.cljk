@@ -1,6 +1,6 @@
 (ns kotoba.lang.kami-nv-compat.utsushimi.writers-test
   "utsushimi.writers: BasicWriter/CocoWriter/KittiWriter + registry coverage."
-  (:require [kotoba.test :refer [deftest is]]
+  (:require [kotoba.lang.error :as kerror] [kotoba.test :refer [deftest is]]
             [kotoba.lang.kami-nv-compat.utsushimi.writers :as w]))
 
 (def cube-prim {:kind :cube :semantics [["class" "cube"]] :bbox2d [10.0 20.0 30.0 40.0]})
@@ -14,7 +14,7 @@
     (is (= 0 (count (:frames (w/finalize-writer b)))))))
 
 (deftest registry-unknown-writer-throws
-  (is (thrown? #?(:clj clojure.lang.ExceptionInfo :cljs cljs.core/ExceptionInfo)
+  (is (thrown? kerror/ExceptionInfo
                (w/writer-registry-get "NoSuchWriter"))))
 
 (deftest registry-register-custom-writer
