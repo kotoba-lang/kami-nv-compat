@@ -1,6 +1,6 @@
 (ns kotoba.lang.kami-nv-compat.actions.task-space-actions-test
   "Task-space action wrappers coverage."
-  (:require [kotoba.test :refer [deftest is testing]]
+  (:require [kotoba.lang.error :as kerror] [kotoba.test :refer [deftest is testing]]
             [kotoba.lang.kami-nv-compat.actions.task-space-actions :as tsa]
             [kotoba.lang.kami-nv-compat.actions.articulated-env :as ae]
             [kotoba.lang.kami-nv-compat.actions.action-term :as at]))
@@ -55,9 +55,9 @@
       (is (= [10.0 10.0] @(:wheel-target m))))))
 
 (deftest action-validation
-  (is (thrown? #?(:clj clojure.lang.ExceptionInfo :cljs cljs.core/ExceptionInfo)
+  (is (thrown? kerror/ExceptionInfo
                (tsa/make-binary-joint-position-action
                  {:joint-names [0 1] :open-command [0] :close-command [0 0]})))
-  (is (thrown? #?(:clj clojure.lang.ExceptionInfo :cljs cljs.core/ExceptionInfo)
+  (is (thrown? kerror/ExceptionInfo
                (tsa/make-non-holonomic-action
                  {:joint-names [0] :wheel-radius 0.1 :wheel-separation 0.4}))))

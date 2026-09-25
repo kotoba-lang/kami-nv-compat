@@ -1,6 +1,6 @@
 (ns kotoba.lang.kami-nv-compat.kami-usd.usda-test
   "kami-usd.usda: USDA recursive-descent parser coverage."
-  (:require [kotoba.test :refer [deftest is]]
+  (:require [kotoba.lang.error :as kerror] [kotoba.test :refer [deftest is]]
             [kotoba.lang.kami-nv-compat.kami-usd.usda :as usda]))
 
 (deftest single-empty-prim
@@ -119,13 +119,13 @@
     (is (= "" (:type-name (first roots))))))
 
 (deftest error-on-invalid-top-level-token
-  (is (thrown? #?(:clj clojure.lang.ExceptionInfo :cljs cljs.core/ExceptionInfo)
+  (is (thrown? kerror/ExceptionInfo
                (usda/parse-usda "notASpecifier \"A\" {}"))))
 
 (deftest error-on-unbalanced-metadata
-  (is (thrown? #?(:clj clojure.lang.ExceptionInfo :cljs cljs.core/ExceptionInfo)
+  (is (thrown? kerror/ExceptionInfo
                (usda/parse-usda "def Xform \"A\" (kind = \"component\" {}"))))
 
 (deftest error-on-unexpected-eof-in-body
-  (is (thrown? #?(:clj clojure.lang.ExceptionInfo :cljs cljs.core/ExceptionInfo)
+  (is (thrown? kerror/ExceptionInfo
                (usda/parse-usda "def Xform \"A\" { double x = 1.0"))))

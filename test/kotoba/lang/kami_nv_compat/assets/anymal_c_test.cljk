@@ -1,7 +1,7 @@
 (ns kotoba.lang.kami-nv-compat.assets.anymal-c-test
   "ANYmal C asset coverage (no dedicated TS test — mirrors the Franka
   count/names consistency + structure)."
-  (:require [kotoba.test :refer [deftest is testing]]
+  (:require [kotoba.lang.error :as kerror] [kotoba.test :refer [deftest is testing]]
             [kotoba.lang.kami-nv-compat.assets.anymal-c :as ac]
             [kotoba.lang.kami-nv-compat.assets.urdf-builder :as ub]))
 
@@ -19,4 +19,4 @@
       (is (= [0 3 6 9]  ((:haa-indices a))))
       (is (= [1 4 7 10] ((:hfe-indices a))))
       (is (= [2 5 8 11] ((:kfe-indices a))))
-      (is (thrown? #?(:clj clojure.lang.ExceptionInfo :cljs cljs.core/ExceptionInfo) ((:leg-indices a) "XX"))))))
+      (is (thrown? kerror/ExceptionInfo ((:leg-indices a) "XX"))))))
